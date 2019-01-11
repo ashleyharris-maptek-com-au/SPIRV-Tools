@@ -245,6 +245,16 @@ Options (in lexicographical order):
 
                These conditions are guaranteed to be met after running
                dead-branch elimination.
+
+  --memory-model-to-logical
+               Attempts to convert the physical32 or Physical64 memory model to
+               Logical. This attempts to track what address pointers point to, follows
+               them through bit casts, pointer maths, loads, stores, and such.
+
+               Useful for dealing with SPIR-V converted from LLVM or other general
+               purpose compilation chains that assume they have carte blanche with
+               memory access.
+
   --loop-unswitch
                Hoists loop-invariant conditionals out of loops by duplicating
                the loop on each branch of the conditional and adjusting each
