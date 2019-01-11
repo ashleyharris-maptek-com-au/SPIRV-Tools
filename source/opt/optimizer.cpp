@@ -29,7 +29,6 @@
 #include "source/util/string_utils.h"
 
 namespace spvtools {
-
 struct Optimizer::PassToken::Impl {
   Impl(std::unique_ptr<opt::Pass> p) : pass(std::move(p)) {}
 
@@ -56,8 +55,8 @@ Optimizer::PassToken::~PassToken() {}
 struct Optimizer::Impl {
   explicit Impl(spv_target_env env) : target_env(env), pass_manager() {}
 
-  spv_target_env target_env;        // Target environment.
-  opt::PassManager pass_manager;    // Internal implementation pass manager.
+  spv_target_env target_env;      // Target environment.
+  opt::PassManager pass_manager;  // Internal implementation pass manager.
 };
 
 Optimizer::Optimizer(spv_target_env env) : impl_(new Impl(env)) {}
@@ -415,6 +414,8 @@ bool Optimizer::RegisterPassFromFlag(const std::string& flag) {
     RegisterPass(CreateLoopUnrollPass(true));
   } else if (pass_name == "upgrade-memory-model") {
     RegisterPass(CreateUpgradeMemoryModelPass());
+  } else if (pass_name == "memory-model-to-logical") {
+    RegisterPass(CreateMemoryModelToLogicalPass());
   } else if (pass_name == "vector-dce") {
     RegisterPass(CreateVectorDCEPass());
   } else if (pass_name == "loop-unroll-partial") {
@@ -782,6 +783,11 @@ Optimizer::PassToken CreateCombineAccessChainsPass() {
 Optimizer::PassToken CreateUpgradeMemoryModelPass() {
   return MakeUnique<Optimizer::PassToken::Impl>(
       MakeUnique<opt::UpgradeMemoryModel>());
+}
+
+Optimizer::PassToken CreateMemoryModelToLogicalPass() {
+  return MakeUnique<Optimizer::PassToken::Impl>(
+      MakeUnique<opt::MemoryModelToLogical>());
 }
 
 Optimizer::PassToken CreateInstBindlessCheckPass(uint32_t desc_set,
