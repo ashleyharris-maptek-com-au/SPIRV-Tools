@@ -202,7 +202,6 @@ std::vector<uint32_t> MemoryModelToLogical::child_types(
     return std::vector<uint32_t>(matrix->element_count(), elementId);
   }
 
-  assert(0);
   return {};
 }
 
@@ -261,6 +260,7 @@ void MemoryModelToLogical::recurse_populate_memory_tree(TreeNode* Node) {
         valueChain->steps = node.local_access_chain;
         valueChain->value = genesis->value;
         valueChain->offset = node.address - genesis->address;
+        valueChain->output_type = node.type;
         node.value = valueChain;
       }
 
@@ -354,6 +354,16 @@ void MemoryModelToLogical::recurse_populate_memory_tree(TreeNode* Node) {
 
   if (Node->has_child) {
     for (auto& child : Node->children) {
+      if (Node->value) {
+        // We had an initialser for this memory
+        auto childData = std::make_shared<DataConstAccessChain>();
+        childData->value = Node->value;
+        childData->steps = child.local_access_chain;
+        childData->offset = int64_t(child.address - Node->address);
+        childData->output_type = child.type;
+        child.value = childData;
+      }
+
       recurse_populate_memory_tree(&child);
     }
   }
@@ -364,7 +374,7 @@ MemoryModelToLogical::try_aligned_uncasted_memory_access(
     const analysis::Type& DesiredType, uint64_t Address, uint32_t Size) {
   auto block = find_memory_location(Address, Size);
 
-  if (block->address == Address && block->size_in_bytes == Size &&
+  if (block && block->address == Address && block->size_in_bytes == Size &&
       block->type == &DesiredType) {
     // That was lucky!
     return block;
@@ -380,13 +390,9 @@ MemoryModelToLogical::try_aligned_access_memory(
 
   auto sizeOf = size_of(DesiredType);
 
-  if (block->size_in_bytes < Size) {
-    assert(0 &&
-           "Buffer overrun. We might need to insert undefined values for "
-           "certain known "
-           "safe cases - eg loading a vec3 aligned to 16 bytes as a vec4 but "
-           "only accessing the "
-           "first 3 elements.");
+  if (!block || block->size_in_bytes < Size) {
+    // buffer overrun.
+    return {};
   }
 
   if (block->type == &DesiredType) {
@@ -455,7 +461,7 @@ MemoryModelToLogical::TreeNode*
 MemoryModelToLogical::find_memory_root_allocation(uint64_t Address) {
   for (auto& child : memory_tree) {
     if (Address >= child.address &&
-        Address <= child.address + child.size_in_bytes) {
+        Address < child.address + child.size_in_bytes) {
       return &child;
     }
   }
@@ -467,9 +473,11 @@ MemoryModelToLogical::find_memory_leaf_allocation(uint64_t Address) {
   std::vector<TreeNode>* branch = &this->memory_tree;
 
   while (!branch->empty()) {
+    bool foundAnything = false;
     for (auto& child : *branch) {
       if (Address >= child.address &&
-          Address <= child.address + child.size_in_bytes) {
+          Address < child.address + child.size_in_bytes) {
+        foundAnything = true;
         branch = &child.children;
         if (branch->empty()) {
           return &child;
@@ -477,6 +485,7 @@ MemoryModelToLogical::find_memory_leaf_allocation(uint64_t Address) {
         break;
       }
     }
+    if (!foundAnything) return nullptr;
   }
 
   return nullptr;
@@ -659,9 +668,42 @@ bool MemoryModelToLogical::find_and_track_pointers(const BasicBlock* Block) {
       }
 
       case SpvOpIAdd: {
-        // :TODO: find the non-pointer, and track it back to a constant if
-        // possible, else try to derive an expression for it.
-        assert(0 && "NYI");
+        auto ptrId = pointersIn.front();
+        auto nonPtrId = nonPointerIdsIn.front();
+
+        auto tryConstant =
+            context()->get_constant_mgr()->GetConstantsFromIds({nonPtrId});
+
+        if (tryConstant.empty()) {
+          auto returnidNo = instruction.GetSingleWordOperand(1);
+          auto& ptrInfo = stack_pointer_details[returnidNo];
+
+          // Not a constant - it was worth a shot.
+          auto idData = id_data.find(nonPtrId);
+          if (idData != id_data.end()) {
+            // We have a known value we're adding, that isn't constant.
+            auto offsetData = std::make_shared<DataBinaryOp>();
+            offsetData->opcode = SpvOpIAdd;
+            offsetData->left =
+                stack_pointer_details[pointersIn.front()].address;
+            offsetData->right = idData->second;
+
+            if (ptrInfo.address.get() == nullptr) {
+              ptrInfo.address = offsetData;
+              learntSomething = true;
+            }
+          } else {
+            assert(0 && "help?");
+          }
+        } else {
+          // We have a constant.
+          auto type = tryConstant.front()->type()->AsInteger();
+          if (!type->IsSigned() && type->width() == 32) {
+            auto constant = tryConstant.front()->AsIntConstant()->GetU32();
+            morphPointerAddConstant(constant);
+          }
+        }
+
         break;
       }
 
@@ -930,38 +972,90 @@ bool MemoryModelToLogical::process(BasicBlock* Block, uint32_t Precessor) {
         if (sourcePtrPotentials.size() == 1) {
           // Simple case - pointer which can point to one place.
 
-          auto block = try_aligned_uncasted_memory_access(
-              *resultTypeInfo, sourcePtrPotentials.front(), sizeOf);
+          struct S {
+            MemoryModelToLogical* me = nullptr;
+            DataPtrT Read(analysis::Type* T, uint64_t Address) {
+              auto simple = me->try_aligned_uncasted_memory_access(
+                  *T, Address, me->size_of(*T));
 
-          if (block) {
-            // Nothing special needed.
-            id_data[resultId] = block->value;
-          } else {
-            auto blocks = try_aligned_access_memory(
-                *resultTypeInfo, sourcePtrPotentials.front(), sizeOf);
+              if (simple) {
+                return simple->value;
+              }
 
-            if (blocks.empty()) {
-              // Read isn't aligned - TODO
-              assert(0 && "NYI");
-            } else {
+              auto blocks =
+                  me->try_aligned_access_memory(*T, Address, me->size_of(*T));
+
               if (blocks.size() == 1) {
                 // This is a cast
                 auto cast = std::make_shared<DataValueCast>();
-                cast->value = block->value;
-                cast->from_type = block->type;
-                cast->to_type = resultTypeInfo;
-                id_data[resultId] = cast;
-              } else {
+                cast->value = blocks.front()->value;
+                cast->from_type = blocks.front()->type;
+                cast->to_type = T;
+
+                return cast;
+              } else if (blocks.size()) {
                 // This is a recomposition
                 auto values = std::make_shared<DataComposition>();
                 for (auto b : blocks) {
+                  // Should I be checking for casting here?
                   values->values.push_back(b->value);
                 }
-                values->output_type = resultTypeInfo;
-                id_data[resultId] = values;
+                values->output_type = T;
+
+                return values;
               }
+
+              // Ok so the easy paths failed. We need to try harder.
+
+              auto childrenTypes = me->child_types(*T);
+
+              if (childrenTypes.size()) {
+                // Try to solve each child individually.
+
+                auto ptr = Address;
+                auto values = std::make_shared<DataComposition>();
+                values->output_type = T;
+
+                for (auto childType : childrenTypes) {
+                  auto typeInfo =
+                      me->context()->get_type_mgr()->GetType(childType);
+                  auto childData = Read(typeInfo, ptr);
+
+                  ptr += me->size_of(*typeInfo);
+
+                  values->values.push_back(childData);
+                }
+                return values;
+              }
+
+              // No children, and still can't figure this out. Find all the
+              // blocks we're actually reading.
+              auto lastByte = Address + me->size_of(*T) - 1;
+              blocks.clear();
+
+              for (auto i = Address; i < lastByte; i++) {
+                auto block = me->find_memory_leaf_allocation(Address);
+
+                if (blocks.empty() || blocks.back() != block)
+                  blocks.push_back(block);
+              }
+
+              if (blocks.size() == 1 && blocks.front() == nullptr) {
+                // We're an entirely undefined read. (Not nescicarily a bug)
+                auto v = std::make_shared<DataUndef>();
+                v->type = T;
+                return v;
+              }
+
+              assert(0 && "NYI");
+              return {};
             }
-          }
+          };
+
+          S s;
+          s.me = this;
+          id_data[resultId] =
+              s.Read(resultTypeInfo, sourcePtrPotentials.front());
         } else {
           assert(0 && "NYI - multi pointer load");
         }
@@ -1543,6 +1637,8 @@ bool MemoryModelToLogical::simulate_store(uint32_t SourceId,
                                           uint64_t DestinationAddress,
                                           uint32_t SizeInBytes) {
   auto& data = id_data[SourceId];
+  auto def = context()->get_def_use_mgr()->GetDef(SourceId);
+  auto type = context()->get_type_mgr()->GetType(def->type_id());
 
   if (!data) {
     // We don't know what we're storing.
@@ -1560,44 +1656,121 @@ bool MemoryModelToLogical::simulate_store(uint32_t SourceId,
     }
   }
 
-  auto destNode = find_memory_location(DestinationAddress, SizeInBytes);
+  auto destNode =
+      find_memory_location(DestinationAddress, uint32_t(SizeInBytes));
 
-  if (destNode->address != DestinationAddress) {
-    assert(0 && "Misaligned write handler NYI");
-    // data = MisAlignedHandler(data)
-  }
-
-  if (destNode->value) {
-    // We're writing over memory. (We can't destNode->value = sourceNode->value
-    // as the old value may have been written elsewhere)
-    assert(0 && "NYI - phi memory trees ");
-  } else {
-    // We're the first time a value has been written here.
-    destNode->value = data;
-  }
-
-  if (destNode->has_child) {
-    // We've written to a level in memory which has members, we need to update
-    // all the children to refer to the new value.
-
-    for (auto& child : destNode->children) {
-      auto childData = std::make_shared<DataConstAccessChain>();
-      childData->value = data;
-      childData->steps = {child.local_access_chain.begin() +
-                              destNode->local_access_chain.size(),
-                          child.local_access_chain.end()};
-
-      childData->offset = int64_t(child.address - destNode->address);
-
-      if (child.value) {
-        // We're writing over memory.
-        assert(0 && "NYI - phi memory trees ");
-      } else {
-        // We're the first time a value has been written here.
-        child.value = childData;
+  struct S_ {
+    MemoryModelToLogical* me;
+    void Write(DataPtrT Data, analysis::Type* Type, uint64_t DestinationAddress,
+               uint64_t SizeInBytes, TreeNode* destNode) {
+      if (DestinationAddress + SizeInBytes <= destNode->address) {
+        // We're not writing to this node. (We're writing before it).
+        return;
       }
+
+      if (destNode->address + destNode->size_in_bytes <= DestinationAddress) {
+        // We're not writing to this node. (We're writing after it).
+        return;
+      }
+
+      if (destNode->address == DestinationAddress &&
+          destNode->size_in_bytes == SizeInBytes) {
+        // Direct write - phew. Simplest case.
+        if (destNode->value) {
+          // We're writing over memory. (We can't destNode->value =
+          // sourceNode->value as the old value may have been written elsewhere)
+          assert(0 && "NYI - phi memory trees ");
+        } else {
+          // We're the first time a value has been written here.
+          destNode->value = Data;
+        }
+
+        if (destNode->has_child) {
+          // We've written to a level in memory which has members, we need to
+          // update all the children to refer to the new value.
+
+          for (auto& child : destNode->children) {
+            auto childData = std::make_shared<DataConstAccessChain>();
+            childData->value = Data;
+            childData->steps = {child.local_access_chain.begin() +
+                                    destNode->local_access_chain.size(),
+                                child.local_access_chain.end()};
+
+            childData->offset = int64_t(child.address - destNode->address);
+            childData->output_type = child.type;
+
+            if (child.value) {
+              // We're writing over memory.
+              assert(0 && "NYI - phi memory trees ");
+            } else {
+              // We're the first time a value has been written here.
+              child.value = childData;
+            }
+          }
+        }
+
+        return;
+      }
+
+      if (SizeInBytes >= destNode->size_in_bytes) {
+        // We're writing something larger than the memory node. Lets look at
+        // subdividing what we're writing.
+        auto childTypes = me->child_types(*Type);
+
+        if (childTypes.size()) {
+          auto offset = 0;
+          auto counter = 0u;
+          for (auto child : childTypes) {
+            auto type = me->context()->get_type_mgr()->GetType(child);
+            auto size = me->size_of(*type);
+
+            auto data = std::make_shared<DataConstAccessChain>();
+            data->value = Data;
+            data->offset = offset;
+            data->steps = {counter++};
+            data->output_type = type;
+
+            Write(data, type, DestinationAddress + offset, size, destNode);
+            offset += size;
+          }
+        } else {
+          // We have no children - and still need to subdivide. Damn
+
+          assert(0 && "NYI - bit manipulative write");
+        }
+        return;
+      }
+
+      if (destNode->has_child && destNode->size_in_bytes > SizeInBytes) {
+        // We are writing to a type which has children, and we're not writing to
+        // the full type.
+
+        for (auto& destChild : destNode->children) {
+          if (destChild.address + destChild.size_in_bytes <=
+              DestinationAddress) {
+            // This child is not touched by the write - it comes before the
+            // data.
+            continue;
+          }
+
+          if (destChild.address >= DestinationAddress + SizeInBytes) {
+            // The child is not touched by the write - it comes after the data.
+            continue;
+          }
+
+          // Subdivide into the child.
+          Write(Data, Type, DestinationAddress, SizeInBytes, &destChild);
+        }
+        return;
+      }
+
+      assert(0);
     }
-  }
+  };
+
+  S_ s;
+  s.me = this;
+  s.Write(data, type, DestinationAddress, SizeInBytes, destNode);
 
   return false;
 }
@@ -1880,6 +2053,7 @@ inline MemoryModelToLogical::Data::ResolutionValueComplexity
 MemoryModelToLogical::Data::Resolved() const {
   ResolutionValueComplexity r = Undefined;
   for (auto d : Dependancies()) {
+    if (!d) continue;
     auto v = d->Resolved();
     r = std::max(r, v);
   }
@@ -1890,6 +2064,7 @@ inline MemoryModelToLogical::Data::ResolutionCfgComplexity
 MemoryModelToLogical::Data::ResolvedCfgComplexity() const {
   ResolutionCfgComplexity r = NoResolution;
   for (auto d : Dependancies()) {
+    if (!d) continue;
     auto v = d->ResolvedCfgComplexity();
     r = std::max(r, v);
   }
@@ -1900,7 +2075,63 @@ inline std::list<InstructionList> MemoryModelToLogical::Data::ConvertToSpirv(
     IRContext* Context, MemoryModelToLogical* Converter) {
   assert(0 && "NYI");
   return std::list<InstructionList>();  // Note return {} needs copyable
-                                        // type.
+                                        // InstructionList.
+}
+
+std::list<InstructionList> MemoryModelToLogical::ExistingValue::ConvertToSpirv(
+    IRContext* Context, MemoryModelToLogical* Converter) {
+  InstructionList block;
+  Instruction copyInstruction(Context, SpvOpCopyObject,
+                              Context->get_def_use_mgr()->GetDef(id)->type_id(),
+                              Context->TakeNextId(), {});
+
+  copyInstruction.AddOperand(Operand(SPV_OPERAND_TYPE_ID, {id}));
+
+  block.push_back(std::make_unique<Instruction>(std::move(copyInstruction)));
+
+  std::list<InstructionList> out;
+  out.push_back(std::move(block));
+  return out;
+}
+
+std::list<InstructionList>
+spvtools::opt::MemoryModelToLogical::DataConstAccessChain::ConvertToSpirv(
+    IRContext* Context, MemoryModelToLogical* Converter) {
+  std::list<InstructionList> out;
+
+  out = value->ConvertToSpirv(Context, Converter);
+
+  auto beginId = out.back().back().result_id();
+  auto beginType = out.back().back().type_id();
+
+  Instruction extractInstruction(Context, SpvOpCompositeExtract,
+                                 Context->get_type_mgr()->GetId(output_type),
+                                 Context->TakeNextId(), {});
+
+  extractInstruction.AddOperand(Operand(SPV_OPERAND_TYPE_ID, {beginId}));
+
+  for (auto step : steps) {
+    extractInstruction.AddOperand(
+        Operand(SPV_OPERAND_TYPE_LITERAL_INTEGER, {step}));
+  }
+
+  out.back().push_back(
+      std::make_unique<Instruction>(std::move(extractInstruction)));
+
+  return out;
+}
+
+std::list<InstructionList> MemoryModelToLogical::DataUndef::ConvertToSpirv(
+    IRContext* Context, MemoryModelToLogical* Converter) {
+  std::list<InstructionList> out;
+  out.push_back({});
+
+  Instruction i(Context, SpvOpUndef, Context->get_type_mgr()->GetId(type),
+                Context->TakeNextId(), {});
+
+  out.back().push_back(std::make_unique<Instruction>(std::move(i)));
+
+  return out;
 }
 
 }  // namespace opt

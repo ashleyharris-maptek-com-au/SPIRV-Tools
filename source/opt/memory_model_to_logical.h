@@ -239,6 +239,9 @@ class MemoryModelToLogical : public Pass {
 
     bool HasExistingId() const { return true; }
     std::vector<uint32_t> ExistingIds() const { return {id}; }
+
+    std::list<InstructionList> ConvertToSpirv(
+        IRContext* Context, MemoryModelToLogical* Converter) override;
   };
 
   // A specialisation constant that exists elsewhere in the SPIR-V
@@ -273,6 +276,7 @@ class MemoryModelToLogical : public Pass {
     DataPtrT value;
     std::vector<uint32_t> steps;
     uint64_t offset = 0;
+    analysis::Type* output_type = nullptr;
 
     std::vector<std::shared_ptr<Data>> Dependancies() const override;
 
@@ -280,6 +284,9 @@ class MemoryModelToLogical : public Pass {
 
     bool HasPtr() const;
     std::vector<uint64_t> PtrValues() const;
+
+    std::list<InstructionList> ConvertToSpirv(
+        IRContext* Context, MemoryModelToLogical* Converter) override;
   };
 
   // Step into some other data using a dynamic index.
@@ -301,6 +308,13 @@ class MemoryModelToLogical : public Pass {
   // ptr, loading it, and then storing it.
   struct DataBitJoin : Data {
     std::vector<DataPtrT> values;
+  };
+
+  struct DataUndef : Data {
+    analysis::Type* type = nullptr;
+
+    std::list<InstructionList> ConvertToSpirv(
+        IRContext* Context, MemoryModelToLogical* Converter) override;
   };
 
   // Takes a chunk of data at a bitwise level. Used when reads / writes are
