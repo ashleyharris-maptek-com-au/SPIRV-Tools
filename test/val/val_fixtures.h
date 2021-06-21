@@ -21,6 +21,7 @@
 #include <string>
 
 #include "source/val/validation_state.h"
+#include "spirv-tools/libspirv.h"
 #include "test/test_fixture.h"
 #include "test/unit_spirv.h"
 
@@ -36,6 +37,11 @@ class ValidateBase : public ::testing::Test,
 
   // Returns the a spv_const_binary struct
   spv_const_binary get_const_binary();
+
+  // Assembles the given SPIR-V text, checks that it fails to assemble,
+  // and returns resulting diagnostic.  No internal state is updated.
+  std::string CompileFailure(std::string code,
+                             spv_target_env env = SPV_ENV_UNIVERSAL_1_0);
 
   // Checks that 'code' is valid SPIR-V text representation and stores the
   // binary version for further method calls.
@@ -56,6 +62,18 @@ class ValidateBase : public ::testing::Test,
   spv_result_t ValidateAndRetrieveValidationState(
       spv_target_env env = SPV_ENV_UNIVERSAL_1_0);
 
+  // Destroys the stored binary.
+  void DestroyBinary() {
+    spvBinaryDestroy(binary_);
+    binary_ = nullptr;
+  }
+
+  // Destroys the stored diagnostic.
+  void DestroyDiagnostic() {
+    spvDiagnosticDestroy(diagnostic_);
+    diagnostic_ = nullptr;
+  }
+
   std::string getDiagnosticString();
   spv_position_t getErrorPosition();
   spv_validator_options getValidatorOptions();
@@ -67,7 +85,7 @@ class ValidateBase : public ::testing::Test,
 };
 
 template <typename T>
-ValidateBase<T>::ValidateBase() : binary_(), diagnostic_() {
+ValidateBase<T>::ValidateBase() : binary_(nullptr), diagnostic_(nullptr) {
   // Initialize to default command line options. Different tests can then
   // specialize specific options as necessary.
   options_ = spvValidatorOptionsCreate();
@@ -83,21 +101,37 @@ void ValidateBase<T>::TearDown() {
   if (diagnostic_) {
     spvDiagnosticPrint(diagnostic_);
   }
-  spvDiagnosticDestroy(diagnostic_);
-  spvBinaryDestroy(binary_);
+  DestroyBinary();
+  DestroyDiagnostic();
   spvValidatorOptionsDestroy(options_);
+}
+
+template <typename T>
+std::string ValidateBase<T>::CompileFailure(std::string code,
+                                            spv_target_env env) {
+  spv_diagnostic diagnostic = nullptr;
+  EXPECT_NE(SPV_SUCCESS,
+            spvTextToBinary(ScopedContext(env).context, code.c_str(),
+                            code.size(), &binary_, &diagnostic));
+  std::string result(diagnostic->error);
+  spvDiagnosticDestroy(diagnostic);
+  return result;
 }
 
 template <typename T>
 void ValidateBase<T>::CompileSuccessfully(std::string code,
                                           spv_target_env env) {
+  DestroyBinary();
   spv_diagnostic diagnostic = nullptr;
-  ASSERT_EQ(SPV_SUCCESS,
-            spvTextToBinary(ScopedContext(env).context, code.c_str(),
-                            code.size(), &binary_, &diagnostic))
+  ScopedContext context(env);
+  auto status = spvTextToBinary(context.context, code.c_str(), code.size(),
+                                &binary_, &diagnostic);
+  EXPECT_EQ(SPV_SUCCESS, status)
       << "ERROR: " << diagnostic->error
       << "\nSPIR-V could not be compiled into binary:\n"
       << code;
+  ASSERT_EQ(SPV_SUCCESS, status);
+  spvDiagnosticDestroy(diagnostic);
 }
 
 template <typename T>
@@ -110,6 +144,14 @@ void ValidateBase<T>::OverwriteAssembledBinary(uint32_t index, uint32_t word) {
 
 template <typename T>
 spv_result_t ValidateBase<T>::ValidateInstructions(spv_target_env env) {
+  DestroyDiagnostic();
+  if (binary_ == nullptr) {
+    fprintf(stderr,
+            "ERROR: Attempting to validate a null binary, did you forget to "
+            "call CompileSuccessfully?");
+    fflush(stderr);
+  }
+  assert(binary_ != nullptr);
   return spvValidateWithOptions(ScopedContext(env).context, options_,
                                 get_const_binary(), &diagnostic_);
 }
@@ -117,6 +159,7 @@ spv_result_t ValidateBase<T>::ValidateInstructions(spv_target_env env) {
 template <typename T>
 spv_result_t ValidateBase<T>::ValidateAndRetrieveValidationState(
     spv_target_env env) {
+  DestroyDiagnostic();
   return spvtools::val::ValidateBinaryAndKeepValidationState(
       ScopedContext(env).context, options_, get_const_binary()->code,
       get_const_binary()->wordCount, &diagnostic_, &vstate_);
@@ -139,5 +182,44 @@ spv_position_t ValidateBase<T>::getErrorPosition() {
 }
 
 }  // namespace spvtest
+
+// For Vulkan testing.
+// Allows test parameter test to list all possible VUIDs with a delimiter that
+// is then split here to check if one VUID was in the error message
+MATCHER_P(AnyVUID, vuid_set, "VUID from the set is in error message") {
+  // use space as delimiter because clang-format will properly line break VUID
+  // strings which is important the entire VUID is in a single line for script
+  // to scan
+  std::string delimiter = " ";
+  std::string token;
+  std::string vuids = std::string(vuid_set);
+  size_t position;
+
+  // Catch case were someone accidentally left spaces by trimming string
+  // clang-format off
+  vuids.erase(std::find_if(vuids.rbegin(), vuids.rend(), [](unsigned char c) {
+    return (c != ' ');
+  }).base(), vuids.end());
+  vuids.erase(vuids.begin(), std::find_if(vuids.begin(), vuids.end(), [](unsigned char c) {
+    return (c != ' ');
+  }));
+  // clang-format on
+
+  do {
+    position = vuids.find(delimiter);
+    if (position != std::string::npos) {
+      token = vuids.substr(0, position);
+      vuids.erase(0, position + delimiter.length());
+    } else {
+      token = vuids.substr(0);  // last item
+    }
+
+    // arg contains diagnostic message
+    if (arg.find(token) != std::string::npos) {
+      return true;
+    }
+  } while (position != std::string::npos);
+  return false;
+}
 
 #endif  // TEST_VAL_VAL_FIXTURES_H_

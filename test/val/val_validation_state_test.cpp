@@ -56,15 +56,16 @@ OpExecutionMode %1 OriginUpperLeft
 %4 = OpTypeFunction %void
 %float = OpTypeFloat 32
 %_struct_6 = OpTypeStruct %float %float
+%null = OpConstantNull %_struct_6
 %7 = OpTypeFunction %_struct_6
 %12 = OpFunction %_struct_6 None %7
 %13 = OpLabel
-OpUnreachable
+OpReturnValue %null
 OpFunctionEnd
 %9 = OpFunction %_struct_6 None %7
 %10 = OpLabel
 %11 = OpFunctionCall %_struct_6 %12
-OpUnreachable
+OpReturnValue %null
 OpFunctionEnd
 %1 = OpFunction %void Pure|Const %4
 %8 = OpLabel
@@ -89,7 +90,7 @@ OpFunctionEnd
 %1 = OpFunction %void Pure|Const %4
 %8 = OpLabel
 %2 = OpFunctionCall %_struct_6 %9
-OpUnreachable
+OpReturn
 OpFunctionEnd
 )";
 
@@ -100,16 +101,17 @@ OpExecutionMode %1 OriginUpperLeft
 %4 = OpTypeFunction %void
 %float = OpTypeFloat 32
 %_struct_6 = OpTypeStruct %float %float
+%null = OpConstantNull %_struct_6
 %7 = OpTypeFunction %_struct_6
 %9 = OpFunction %_struct_6 None %7
 %10 = OpLabel
 %11 = OpFunctionCall %_struct_6 %12
-OpUnreachable
+OpReturnValue %null
 OpFunctionEnd
 %12 = OpFunction %_struct_6 None %7
 %13 = OpLabel
 %14 = OpFunctionCall %_struct_6 %9
-OpUnreachable
+OpReturnValue %null
 OpFunctionEnd
 %1 = OpFunction %void Pure|Const %4
 %8 = OpLabel
@@ -243,12 +245,6 @@ TEST_F(ValidationStateTest, CheckVulkanNonRecursiveBodyGood) {
             ValidateAndRetrieveValidationState(SPV_ENV_VULKAN_1_1));
 }
 
-TEST_F(ValidationStateTest, CheckWebGPUNonRecursiveBodyGood) {
-  std::string spirv = std::string(kVulkanMemoryHeader) + kNonRecursiveBody;
-  CompileSuccessfully(spirv, SPV_ENV_WEBGPU_0);
-  EXPECT_EQ(SPV_SUCCESS, ValidateAndRetrieveValidationState(SPV_ENV_WEBGPU_0));
-}
-
 TEST_F(ValidationStateTest, CheckDirectlyRecursiveBodyGood) {
   std::string spirv = std::string(kHeader) + kDirectlyRecursiveBody;
   CompileSuccessfully(spirv);
@@ -261,15 +257,7 @@ TEST_F(ValidationStateTest, CheckVulkanDirectlyRecursiveBodyBad) {
   EXPECT_EQ(SPV_ERROR_INVALID_BINARY,
             ValidateAndRetrieveValidationState(SPV_ENV_VULKAN_1_1));
   EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Entry points may not have a call graph with cycles.\n "
-                        " %1 = OpFunction %void Pure|Const %3\n"));
-}
-
-TEST_F(ValidationStateTest, CheckWebGPUDirectlyRecursiveBodyBad) {
-  std::string spirv = std::string(kVulkanMemoryHeader) + kDirectlyRecursiveBody;
-  CompileSuccessfully(spirv, SPV_ENV_WEBGPU_0);
-  EXPECT_EQ(SPV_ERROR_INVALID_BINARY,
-            ValidateAndRetrieveValidationState(SPV_ENV_WEBGPU_0));
+              AnyVUID("VUID-StandaloneSpirv-None-04634"));
   EXPECT_THAT(getDiagnosticString(),
               HasSubstr("Entry points may not have a call graph with cycles.\n "
                         " %1 = OpFunction %void Pure|Const %3\n"));
@@ -288,22 +276,10 @@ TEST_F(ValidationStateTest, CheckVulkanIndirectlyRecursiveBodyBad) {
   EXPECT_EQ(SPV_ERROR_INVALID_BINARY,
             ValidateAndRetrieveValidationState(SPV_ENV_VULKAN_1_1));
   EXPECT_THAT(getDiagnosticString(),
+              AnyVUID("VUID-StandaloneSpirv-None-04634"));
+  EXPECT_THAT(getDiagnosticString(),
               HasSubstr("Entry points may not have a call graph with cycles.\n "
                         " %1 = OpFunction %void Pure|Const %3\n"));
-}
-
-// Indirectly recursive functions are caught by the function definition layout
-// rules, because they cause a situation where there are 2 functions that have
-// to be before each other, and layout is checked earlier.
-TEST_F(ValidationStateTest, CheckWebGPUIndirectlyRecursiveBodyBad) {
-  std::string spirv =
-      std::string(kVulkanMemoryHeader) + kIndirectlyRecursiveBody;
-  CompileSuccessfully(spirv, SPV_ENV_WEBGPU_0);
-  EXPECT_EQ(SPV_ERROR_INVALID_LAYOUT,
-            ValidateAndRetrieveValidationState(SPV_ENV_WEBGPU_0));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("For WebGPU, functions need to be defined before being "
-                        "called.\n  %9 = OpFunctionCall %_struct_5 %10\n"));
 }
 
 }  // namespace

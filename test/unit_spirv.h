@@ -133,29 +133,6 @@ inline std::vector<uint32_t> Concatenate(
   return result;
 }
 
-// Encodes a string as a sequence of words, using the SPIR-V encoding.
-inline std::vector<uint32_t> MakeVector(std::string input) {
-  std::vector<uint32_t> result;
-  uint32_t word = 0;
-  size_t num_bytes = input.size();
-  // SPIR-V strings are null-terminated.  The byte_index == num_bytes
-  // case is used to push the terminating null byte.
-  for (size_t byte_index = 0; byte_index <= num_bytes; byte_index++) {
-    const auto new_byte =
-        (byte_index < num_bytes ? uint8_t(input[byte_index]) : uint8_t(0));
-    word |= (new_byte << (8 * (byte_index % sizeof(uint32_t))));
-    if (3 == (byte_index % sizeof(uint32_t))) {
-      result.push_back(word);
-      word = 0;
-    }
-  }
-  // Emit a trailing partial word.
-  if ((num_bytes + 1) % sizeof(uint32_t)) {
-    result.push_back(word);
-  }
-  return result;
-}
-
 // A type for easily creating spv_text_t values, with an implicit conversion to
 // spv_text.
 struct AutoText {
@@ -218,7 +195,7 @@ inline std::vector<spv_target_env> AllTargetEnvironments() {
       SPV_ENV_OPENGL_4_1,    SPV_ENV_OPENGL_4_2,
       SPV_ENV_OPENGL_4_3,    SPV_ENV_OPENGL_4_5,
       SPV_ENV_UNIVERSAL_1_2, SPV_ENV_UNIVERSAL_1_3,
-      SPV_ENV_VULKAN_1_1,    SPV_ENV_WEBGPU_0,
+      SPV_ENV_VULKAN_1_1,
   };
 }
 

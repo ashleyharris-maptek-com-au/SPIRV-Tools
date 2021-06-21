@@ -21,7 +21,7 @@ namespace {
 using GetTargetOpcodeTableGetTest = ::testing::TestWithParam<spv_target_env>;
 using ::testing::ValuesIn;
 
-TEST_P(GetTargetOpcodeTableGetTest, SanityCheck) {
+TEST_P(GetTargetOpcodeTableGetTest, IntegrityCheck) {
   spv_opcode_table table;
   ASSERT_EQ(SPV_SUCCESS, spvOpcodeTableGet(&table, GetParam()));
   ASSERT_NE(0u, table->count);
@@ -32,8 +32,8 @@ TEST_P(GetTargetOpcodeTableGetTest, InvalidPointerTable) {
   ASSERT_EQ(SPV_ERROR_INVALID_POINTER, spvOpcodeTableGet(nullptr, GetParam()));
 }
 
-INSTANTIATE_TEST_CASE_P(OpcodeTableGet, GetTargetOpcodeTableGetTest,
-                        ValuesIn(spvtest::AllTargetEnvironments()));
+INSTANTIATE_TEST_SUITE_P(OpcodeTableGet, GetTargetOpcodeTableGetTest,
+                         ValuesIn(spvtest::AllTargetEnvironments()));
 
 }  // namespace
 }  // namespace spvtools

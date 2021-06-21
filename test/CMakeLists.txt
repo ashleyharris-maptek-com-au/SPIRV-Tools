@@ -100,8 +100,10 @@ set(TEST_SOURCES
   diagnostic_test.cpp
   enum_string_mapping_test.cpp
   enum_set_test.cpp
+  ext_inst.cldebug100_test.cpp
   ext_inst.debuginfo_test.cpp
   ext_inst.glsl_test.cpp
+  ext_inst.non_semantic_test.cpp
   ext_inst.opencl_test.cpp
   fix_word_test.cpp
   generator_magic_number_test.cpp
@@ -129,6 +131,7 @@ set(TEST_SOURCES
   text_start_new_inst_test.cpp
   text_to_binary.annotation_test.cpp
   text_to_binary.barrier_test.cpp
+  text_to_binary.composite_test.cpp
   text_to_binary.constant_test.cpp
   text_to_binary.control_flow_test.cpp
   text_to_binary_test.cpp
@@ -156,12 +159,12 @@ spvtools_pch(TEST_SOURCES pch_test)
 add_spvtools_unittest(
   TARGET spirv_unit_tests
   SRCS ${TEST_SOURCES}
-  LIBS ${SPIRV_TOOLS})
+  LIBS ${SPIRV_TOOLS_FULL_VISIBILITY})
 
 add_spvtools_unittest(
   TARGET c_interface
   SRCS c_interface_test.cpp
-  LIBS ${SPIRV_TOOLS})
+  LIBS ${SPIRV_TOOLS_FULL_VISIBILITY})
 
 add_spvtools_unittest(
   TARGET c_interface_shared
@@ -178,37 +181,14 @@ if (${SPIRV_TIMER_ENABLED})
 add_spvtools_unittest(
   TARGET timer
   SRCS timer_test.cpp
-  LIBS ${SPIRV_TOOLS})
+  LIBS ${SPIRV_TOOLS_FULL_VISIBILITY})
 endif()
 
 
-add_spvtools_unittest(
-  TARGET bit_stream
-  SRCS bit_stream.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/bit_stream.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/bit_stream.h
-  LIBS ${SPIRV_TOOLS})
-
-add_spvtools_unittest(
-  TARGET huffman_codec
-  SRCS huffman_codec.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/bit_stream.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/bit_stream.h
-      ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/huffman_codec.h
-  LIBS ${SPIRV_TOOLS})
-
-add_spvtools_unittest(
-  TARGET move_to_front
-  SRCS move_to_front_test.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/move_to_front.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../source/comp/move_to_front.cpp
-  LIBS ${SPIRV_TOOLS})
-
-add_subdirectory(comp)
 add_subdirectory(link)
 add_subdirectory(opt)
 add_subdirectory(reduce)
-add_subdirectory(stats)
+add_subdirectory(fuzz)
 add_subdirectory(tools)
 add_subdirectory(util)
 add_subdirectory(val)

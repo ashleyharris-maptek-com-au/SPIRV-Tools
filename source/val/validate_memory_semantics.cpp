@@ -25,7 +25,8 @@ namespace val {
 
 spv_result_t ValidateMemorySemantics(ValidationState_t& _,
                                      const Instruction* inst,
-                                     uint32_t operand_index) {
+                                     uint32_t operand_index,
+                                     uint32_t memory_scope) {
   const SpvOp opcode = inst->opcode();
   const auto id = inst->GetOperandAs<const uint32_t>(operand_index);
   bool is_int32 = false, is_const_int32 = false;
@@ -39,31 +40,21 @@ spv_result_t ValidateMemorySemantics(ValidationState_t& _,
   }
 
   if (!is_const_int32) {
-    if (_.HasCapability(SpvCapabilityShader)) {
+    if (_.HasCapability(SpvCapabilityShader) &&
+        !_.HasCapability(SpvCapabilityCooperativeMatrixNV)) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
              << "Memory Semantics ids must be OpConstant when Shader "
                 "capability is present";
     }
-    return SPV_SUCCESS;
-  }
 
-  if (spvIsWebGPUEnv(_.context()->target_env)) {
-    uint32_t valid_bits = SpvMemorySemanticsAcquireMask |
-                          SpvMemorySemanticsReleaseMask |
-                          SpvMemorySemanticsAcquireReleaseMask |
-                          SpvMemorySemanticsUniformMemoryMask |
-                          SpvMemorySemanticsWorkgroupMemoryMask |
-                          SpvMemorySemanticsImageMemoryMask |
-                          SpvMemorySemanticsOutputMemoryKHRMask |
-                          SpvMemorySemanticsMakeAvailableKHRMask |
-                          SpvMemorySemanticsMakeVisibleKHRMask;
-    if (value & ~valid_bits) {
+    if (_.HasCapability(SpvCapabilityShader) &&
+        _.HasCapability(SpvCapabilityCooperativeMatrixNV) &&
+        !spvOpcodeIsConstant(_.GetIdOpcode(id))) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
-             << "WebGPU spec disallows any bit masks in Memory Semantics that "
-                "are not Acquire, Release, AcquireRelease, UniformMemory, "
-                "WorkgroupMemory, ImageMemory, OutputMemoryKHR, "
-                "MakeAvailableKHR, or MakeVisibleKHR";
+             << "Memory Semantics must be a constant instruction when "
+                "CooperativeMatrixNV capability is present";
     }
+    return SPV_SUCCESS;
   }
 
   const size_t num_memory_order_set_bits = spvtools::utils::CountSetBits(
@@ -110,6 +101,21 @@ spv_result_t ValidateMemorySemantics(ValidationState_t& _,
            << spvOpcodeString(opcode)
            << ": Memory Semantics OutputMemoryKHR requires capability "
            << "VulkanMemoryModelKHR";
+  }
+
+  if (value & SpvMemorySemanticsVolatileMask) {
+    if (!_.HasCapability(SpvCapabilityVulkanMemoryModelKHR)) {
+      return _.diag(SPV_ERROR_INVALID_DATA, inst)
+             << spvOpcodeString(opcode)
+             << ": Memory Semantics Volatile requires capability "
+                "VulkanMemoryModelKHR";
+    }
+
+    if (!spvOpcodeIsAtomicOp(inst->opcode())) {
+      return _.diag(SPV_ERROR_INVALID_DATA, inst)
+             << "Memory Semantics Volatile can only be used with atomic "
+                "instructions";
+    }
   }
 
   if (value & SpvMemorySemanticsUniformMemoryMask &&
@@ -167,17 +173,29 @@ spv_result_t ValidateMemorySemantics(ValidationState_t& _,
 
     if (opcode == SpvOpMemoryBarrier && !num_memory_order_set_bits) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
-             << spvOpcodeString(opcode)
+             << _.VkErrorID(4732) << spvOpcodeString(opcode)
              << ": Vulkan specification requires Memory Semantics to have "
                 "one "
                 "of the following bits set: Acquire, Release, "
                 "AcquireRelease "
                 "or SequentiallyConsistent";
+    } else if (opcode != SpvOpMemoryBarrier && num_memory_order_set_bits) {
+      // should leave only atomics and control barriers for Vulkan env
+      bool memory_is_int32 = false, memory_is_const_int32 = false;
+      uint32_t memory_value = 0;
+      std::tie(memory_is_int32, memory_is_const_int32, memory_value) =
+          _.EvalInt32IfConst(memory_scope);
+      if (memory_is_int32 && memory_value == SpvScopeInvocation) {
+        return _.diag(SPV_ERROR_INVALID_DATA, inst)
+               << _.VkErrorID(4641) << spvOpcodeString(opcode)
+               << ": Vulkan specification requires Memory Semantics to be None "
+                  "if used with Invocation Memory Scope";
+      }
     }
 
     if (opcode == SpvOpMemoryBarrier && !includes_storage_class) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
-             << spvOpcodeString(opcode)
+             << _.VkErrorID(4733) << spvOpcodeString(opcode)
              << ": expected Memory Semantics to include a Vulkan-supported "
                 "storage class";
     }
@@ -218,6 +236,7 @@ spv_result_t ValidateMemorySemantics(ValidationState_t& _,
          value & SpvMemorySemanticsAcquireReleaseMask ||
          value & SpvMemorySemanticsSequentiallyConsistentMask)) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
+             << _.VkErrorID(4731)
              << "Vulkan spec disallows OpAtomicLoad with Memory Semantics "
                 "Release, AcquireRelease and SequentiallyConsistent";
     }
@@ -227,6 +246,7 @@ spv_result_t ValidateMemorySemantics(ValidationState_t& _,
          value & SpvMemorySemanticsAcquireReleaseMask ||
          value & SpvMemorySemanticsSequentiallyConsistentMask)) {
       return _.diag(SPV_ERROR_INVALID_DATA, inst)
+             << _.VkErrorID(4730)
              << "Vulkan spec disallows OpAtomicStore with Memory Semantics "
                 "Acquire, AcquireRelease and SequentiallyConsistent";
     }

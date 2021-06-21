@@ -17,35 +17,47 @@ add_subdirectory(loop_optimizations)
 
 add_spvtools_unittest(TARGET opt
   SRCS aggressive_dead_code_elim_test.cpp
+       amd_ext_to_khr.cpp
        assembly_builder_test.cpp
        block_merge_test.cpp
        ccp_test.cpp
        cfg_cleanup_test.cpp
+       cfg_test.cpp
+       code_sink_test.cpp
        combine_access_chains_test.cpp
-       common_uniform_elim_test.cpp
        compact_ids_test.cpp
+       constants_test.cpp
        constant_manager_test.cpp
+       convert_relaxed_to_half_test.cpp
        copy_prop_array_test.cpp
        dead_branch_elim_test.cpp
        dead_insert_elim_test.cpp
        dead_variable_elim_test.cpp
+       debug_info_manager_test.cpp
        decoration_manager_test.cpp
        def_use_test.cpp
+       desc_sroa_test.cpp
        eliminate_dead_const_test.cpp
        eliminate_dead_functions_test.cpp
+       eliminate_dead_member_test.cpp
        feature_manager_test.cpp
+       fix_storage_class_test.cpp
        flatten_decoration_test.cpp
        fold_spec_const_op_composite_test.cpp
        fold_test.cpp
        freeze_spec_const_test.cpp
        function_test.cpp
+       graphics_robust_access_test.cpp
        if_conversion_test.cpp
        inline_opaque_test.cpp
        inline_test.cpp
        insert_extract_elim_test.cpp
        inst_bindless_check_test.cpp
+       inst_buff_addr_check_test.cpp
+       inst_debug_printf_test.cpp
        instruction_list_test.cpp
        instruction_test.cpp
+       interp_fixup_test.cpp
        ir_builder.cpp
        ir_context_test.cpp
        ir_loader_test.cpp
@@ -64,11 +76,11 @@ add_spvtools_unittest(TARGET opt
        pass_remove_duplicates_test.cpp
        pass_utils.cpp
        private_to_local_test.cpp
-       process_lines_test.cpp
        propagator_test.cpp
        reduce_load_size_test.cpp
        redundancy_elimination_test.cpp
        register_liveness.cpp
+       relax_float_ops_test.cpp
        replace_invalid_opc_test.cpp
        scalar_analysis.cpp
        scalar_replacement_test.cpp
@@ -81,16 +93,12 @@ add_spvtools_unittest(TARGET opt
        type_manager_test.cpp
        types_test.cpp
        unify_const_test.cpp
+       upgrade_memory_model_test.cpp
        utils_test.cpp pass_utils.cpp
        value_table_test.cpp
        vector_dce_test.cpp
        workaround1209_test.cpp
-  LIBS SPIRV-Tools-opt
-  PCH_FILE pch_test_opt
-)
-
-add_spvtools_unittest(TARGET upgrade_memory_model
-  SRCS upgrade_memory_model_test.cpp pass_utils.cpp
+       wrap_opkill_test.cpp
   LIBS SPIRV-Tools-opt
   PCH_FILE pch_test_opt
 )

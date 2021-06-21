@@ -186,6 +186,81 @@ OpFunctionEnd
                                             true, true);
 }
 
+TEST_F(DeadBranchElimTest, IfThenElseNull) {
+  // For booleans OpConstantNull should be treated similar to OpConstantFalse.
+  //
+  // From the SPIR-V spec:
+  // OpConstantNull: Declares a new null constant value.
+  // The null value is type dependent, defined as follows:
+  // - Scalar Boolean: false
+  // ...
+
+  const std::string predefs =
+      R"(OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %gl_FragColor %BaseColor
+OpExecutionMode %main OriginUpperLeft
+OpSource GLSL 140
+OpName %main "main"
+OpName %v "v"
+OpName %gl_FragColor "gl_FragColor"
+OpName %BaseColor "BaseColor"
+%void = OpTypeVoid
+%7 = OpTypeFunction %void
+%bool = OpTypeBool
+%9 = OpConstantNull %bool
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%_ptr_Function_v4float = OpTypePointer Function %v4float
+%float_0 = OpConstant %float 0
+%14 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+%float_1 = OpConstant %float 1
+%16 = OpConstantComposite %v4float %float_1 %float_1 %float_1 %float_1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%gl_FragColor = OpVariable %_ptr_Output_v4float Output
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%BaseColor = OpVariable %_ptr_Input_v4float Input
+)";
+
+  const std::string before =
+      R"(%main = OpFunction %void None %7
+%19 = OpLabel
+%v = OpVariable %_ptr_Function_v4float Function
+OpSelectionMerge %20 None
+OpBranchConditional %9 %21 %22
+%21 = OpLabel
+OpStore %v %14
+OpBranch %20
+%22 = OpLabel
+OpStore %v %16
+OpBranch %20
+%20 = OpLabel
+%23 = OpLoad %v4float %v
+OpStore %gl_FragColor %23
+OpReturn
+OpFunctionEnd
+)";
+
+  const std::string after =
+      R"(%main = OpFunction %void None %7
+%19 = OpLabel
+%v = OpVariable %_ptr_Function_v4float Function
+OpBranch %22
+%22 = OpLabel
+OpStore %v %16
+OpBranch %20
+%20 = OpLabel
+%23 = OpLoad %v4float %v
+OpStore %gl_FragColor %23
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndCheck<DeadBranchElimPass>(predefs + before, predefs + after,
+                                            true, true);
+}
+
 TEST_F(DeadBranchElimTest, IfThenTrue) {
   // #version 140
   //
@@ -1378,6 +1453,7 @@ OpFunctionEnd
 
   SinglePassRunAndMatch<DeadBranchElimPass>(text, true);
 }
+
 TEST_F(DeadBranchElimTest, LeaveContinueBackedgeExtraBlock) {
   const std::string text = R"(
 ; CHECK: OpBranch [[header:%\w+]]
@@ -2646,6 +2722,7 @@ OpSource GLSL 140
 ; CHECK: [[bb1]] = OpLabel
 ; CHECK-NEXT: OpBranch [[bb2:%\w+]]
 ; CHECK: [[bb2]] = OpLabel
+; CHECK-NEXT: OpSelectionMerge
 ; CHECK-NEXT: OpSwitch {{%\w+}} [[bb3:%\w+]] 0 [[loop_merge]] 1 [[bb3:%\w+]]
 ; CHECK: [[bb3]] = OpLabel
 ; CHECK-NEXT: OpBranch [[sel_merge:%\w+]]
@@ -2663,6 +2740,7 @@ OpBranch %bb1
 OpSelectionMerge %sel_merge None
 OpBranchConditional %true %bb2 %bb4
 %bb2 = OpLabel
+OpSelectionMerge %bb3 None
 OpSwitch %undef_int %bb3 0 %loop_merge 1 %bb3
 %bb3 = OpLabel
 OpBranch %sel_merge
@@ -2706,6 +2784,7 @@ OpSource GLSL 140
 ; CHECK: [[bb1]] = OpLabel
 ; CHECK-NEXT: OpBranch [[bb2:%\w+]]
 ; CHECK: [[bb2]] = OpLabel
+; CHECK-NEXT: OpSelectionMerge
 ; CHECK-NEXT: OpSwitch {{%\w+}} [[bb3:%\w+]] 0 [[loop_cont]] 1 [[bb3:%\w+]]
 ; CHECK: [[bb3]] = OpLabel
 ; CHECK-NEXT: OpBranch [[sel_merge:%\w+]]
@@ -2723,6 +2802,7 @@ OpBranch %bb1
 OpSelectionMerge %sel_merge None
 OpBranchConditional %true %bb2 %bb4
 %bb2 = OpLabel
+OpSelectionMerge %bb3 None
 OpSwitch %undef_int %bb3 0 %cont 1 %bb3
 %bb3 = OpLabel
 OpBranch %sel_merge
@@ -2798,7 +2878,9 @@ OpReturn
 OpFunctionEnd
 )";
 
-  SinglePassRunAndMatch<DeadBranchElimPass>(predefs + body, true);
+  // The selection merge in the loop naming the continue target as merge is
+  // invalid, but handled by this pass so validation is disabled.
+  SinglePassRunAndMatch<DeadBranchElimPass>(predefs + body, false);
 }
 
 TEST_F(DeadBranchElimTest, SelectionMergeWithNestedLoop) {
@@ -2866,6 +2948,459 @@ TEST_F(DeadBranchElimTest, SelectionMergeWithNestedLoop) {
 )";
 
   SinglePassRunAndMatch<DeadBranchElimPass>(body, true);
+}
+
+TEST_F(DeadBranchElimTest, DontFoldBackedge) {
+  const std::string body =
+      R"(OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %2 "main"
+OpExecutionMode %2 OriginUpperLeft
+%void = OpTypeVoid
+%4 = OpTypeFunction %void
+%bool = OpTypeBool
+%false = OpConstantFalse %bool
+%2 = OpFunction %void None %4
+%7 = OpLabel
+OpBranch %8
+%8 = OpLabel
+OpLoopMerge %9 %10 None
+OpBranch %11
+%11 = OpLabel
+%12 = OpUndef %bool
+OpSelectionMerge %10 None
+OpBranchConditional %12 %13 %10
+%13 = OpLabel
+OpBranch %9
+%10 = OpLabel
+OpBranch %14
+%14 = OpLabel
+OpBranchConditional %false %8 %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndCheck<DeadBranchElimPass>(body, body, true);
+}
+
+TEST_F(DeadBranchElimTest, FoldBackedgeToHeader) {
+  const std::string body =
+      R"(
+; CHECK: OpLabel
+; CHECK: [[header:%\w+]] = OpLabel
+; CHECK-NEXT: OpLoopMerge {{%\w+}} [[cont:%\w+]]
+; CHECK: [[cont]] = OpLabel
+; This branch may not be in the continue block, but must come after it.
+; CHECK: OpBranch [[header]]
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %2 "main"
+OpExecutionMode %2 OriginUpperLeft
+%void = OpTypeVoid
+%4 = OpTypeFunction %void
+%bool = OpTypeBool
+%true = OpConstantTrue %bool
+%2 = OpFunction %void None %4
+%7 = OpLabel
+OpBranch %8
+%8 = OpLabel
+OpLoopMerge %9 %10 None
+OpBranch %11
+%11 = OpLabel
+%12 = OpUndef %bool
+OpSelectionMerge %10 None
+OpBranchConditional %12 %13 %10
+%13 = OpLabel
+OpBranch %9
+%10 = OpLabel
+OpBranch %14
+%14 = OpLabel
+OpBranchConditional %true %8 %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  // The selection merge in the loop naming the continue target as merge is
+  // invalid, but handled by this pass so validation is disabled.
+  SinglePassRunAndMatch<DeadBranchElimPass>(body, false);
+}
+
+TEST_F(DeadBranchElimTest, UnreachableMergeAndContinueSameBlock) {
+  const std::string spirv = R"(
+; CHECK: OpLabel
+; CHECK: [[outer:%\w+]] = OpLabel
+; CHECK-NEXT: OpLoopMerge [[outer_merge:%\w+]] [[outer_cont:%\w+]] None
+; CHECK-NEXT: OpBranch [[inner:%\w+]]
+; CHECK: [[inner]] = OpLabel
+; CHECK: OpLoopMerge [[outer_cont]] [[inner_cont:%\w+]] None
+; CHECK: [[inner_cont]] = OpLabel
+; CHECK-NEXT: OpBranch [[inner]]
+; CHECK: [[outer_cont]] = OpLabel
+; CHECK-NEXT: OpBranch [[outer]]
+; CHECK: [[outer_merge]] = OpLabel
+; CHECK-NEXT: OpUnreachable
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+%void = OpTypeVoid
+%bool = OpTypeBool
+%true = OpConstantTrue %bool
+%void_fn = OpTypeFunction %void
+%main = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %outer_loop
+%outer_loop = OpLabel
+OpLoopMerge %outer_merge %outer_continue None
+OpBranch %inner_loop
+%inner_loop = OpLabel
+OpLoopMerge %outer_continue %inner_continue None
+OpBranch %inner_body
+%inner_body = OpLabel
+OpSelectionMerge %inner_continue None
+OpBranchConditional %true %ret %inner_continue
+%ret = OpLabel
+OpReturn
+%inner_continue = OpLabel
+OpBranchConditional %true %outer_continue %inner_loop
+%outer_continue = OpLabel
+OpBranchConditional %true %outer_merge %outer_loop
+%outer_merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndMatch<DeadBranchElimPass>(spirv, true);
+}
+
+// Fold a switch with a nested break.  The only case should be the default.
+TEST_F(DeadBranchElimTest, FoldSwitchWithNestedBreak) {
+  const std::string spirv = R"(
+; CHECK: OpSwitch %int_3 [[case_bb:%\w+]]{{[[:space:]]}}
+; CHECK: [[case_bb]] = OpLabel
+; CHECK-NEXT: OpUndef
+; CHECK-NEXT: OpSelectionMerge
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %2 "main"
+               OpSource GLSL 450
+       %void = OpTypeVoid
+          %4 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+%_ptr_Function_int = OpTypePointer Function %int
+      %int_3 = OpConstant %int 3
+      %int_1 = OpConstant %int 1
+       %bool = OpTypeBool
+          %2 = OpFunction %void None %4
+         %10 = OpLabel
+               OpSelectionMerge %11 None
+               OpSwitch %int_3 %12 3 %13
+         %12 = OpLabel
+               OpBranch %11
+         %13 = OpLabel
+         %14 = OpUndef %bool
+               OpSelectionMerge %15 None
+               OpBranchConditional %14 %16 %15
+         %16 = OpLabel
+               OpBranch %11
+         %15 = OpLabel
+               OpBranch %11
+         %11 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  SinglePassRunAndMatch<DeadBranchElimPass>(spirv, true);
+}
+
+TEST_F(DeadBranchElimTest, FoldBranchWithBreakToSwitch) {
+  const std::string spirv = R"(
+; CHECK: OpSelectionMerge [[sel_merge:%\w+]]
+; CHECK-NEXT: OpSwitch {{%\w+}} {{%\w+}} 3 [[bb:%\w+]]
+; CHECK: [[bb]] = OpLabel
+; CHECK-NEXT: OpBranch [[bb2:%\w+]]
+; CHECK: [[bb2]] = OpLabel
+; CHECK-NOT: OpSelectionMerge
+; CHECK: OpFunctionEnd
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %2 "main"
+               OpSource GLSL 450
+       %void = OpTypeVoid
+          %4 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+%_ptr_Function_int = OpTypePointer Function %int
+      %int_3 = OpConstant %int 3
+      %int_1 = OpConstant %int 1
+       %bool = OpTypeBool
+       %true = OpConstantTrue %bool
+          %2 = OpFunction %void None %4
+         %10 = OpLabel
+  %undef_int = OpUndef %int
+               OpSelectionMerge %11 None
+               OpSwitch %undef_int %12 3 %13
+         %12 = OpLabel
+               OpBranch %11
+         %13 = OpLabel
+               OpSelectionMerge %15 None
+               OpBranchConditional %true %16 %15
+         %16 = OpLabel
+         %14 = OpUndef %bool
+               OpBranchConditional %14 %11 %17
+         %17 = OpLabel
+               OpBranch %15
+         %15 = OpLabel
+               OpBranch %11
+         %11 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  SinglePassRunAndMatch<DeadBranchElimPass>(spirv, true);
+}
+
+TEST_F(DeadBranchElimTest, IfInSwitch) {
+  // #version 310 es
+  //
+  // void main()
+  // {
+  //  switch(0)
+  //  {
+  //   case 0:
+  //   if(false)
+  //   {
+  //   }
+  //   else
+  //   {
+  //   }
+  //  }
+  // }
+
+  const std::string before =
+      R"(OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpSource ESSL 310
+OpName %main "main"
+%void = OpTypeVoid
+%3 = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%int_0 = OpConstant %int 0
+%bool = OpTypeBool
+%false = OpConstantFalse %bool
+%main = OpFunction %void None %3
+%5 = OpLabel
+OpSelectionMerge %9 None
+OpSwitch %int_0 %9 0 %8
+%8 = OpLabel
+OpSelectionMerge %13 None
+OpBranchConditional %false %12 %13
+%12 = OpLabel
+OpBranch %13
+%13 = OpLabel
+OpBranch %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  const std::string after =
+      R"(OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpSource ESSL 310
+OpName %main "main"
+%void = OpTypeVoid
+%4 = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%int_0 = OpConstant %int 0
+%bool = OpTypeBool
+%false = OpConstantFalse %bool
+%main = OpFunction %void None %4
+%9 = OpLabel
+OpBranch %11
+%11 = OpLabel
+OpBranch %12
+%12 = OpLabel
+OpBranch %10
+%10 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndCheck<DeadBranchElimPass>(before, after, true, true);
+}
+
+TEST_F(DeadBranchElimTest, BreakInNestedHeaderWithSingleCase) {
+  const std::string text = R"(OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpSource GLSL 450
+OpName %main "main"
+%void = OpTypeVoid
+%4 = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%uint_0 = OpConstant %uint 0
+%8 = OpUndef %bool
+%main = OpFunction %void None %4
+%9 = OpLabel
+OpSelectionMerge %10 None
+OpSwitch %uint_0 %11
+%11 = OpLabel
+OpSelectionMerge %12 None
+OpBranchConditional %8 %10 %12
+%12 = OpLabel
+OpBranch %10
+%10 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndCheck<DeadBranchElimPass>(text, text, true, true);
+}
+
+TEST_F(DeadBranchElimTest, BreakInNestedHeaderWithTwoCases) {
+  const std::string text = R"(
+; CHECK: OpSelectionMerge [[merge:%\w+]] None
+; CHECK-NEXT: OpSwitch %uint_0 [[bb:%\w+\n]]
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpSource GLSL 450
+OpName %main "main"
+%void = OpTypeVoid
+%4 = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%uint_0 = OpConstant %uint 0
+%8 = OpUndef %bool
+%main = OpFunction %void None %4
+%9 = OpLabel
+OpSelectionMerge %10 None
+OpSwitch %uint_0 %11 1 %12
+%11 = OpLabel
+OpSelectionMerge %13 None
+OpBranchConditional %8 %10 %13
+%13 = OpLabel
+OpBranch %10
+%12 = OpLabel
+OpBranch %10
+%10 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndMatch<DeadBranchElimPass>(text, true);
+}
+
+TEST_F(DeadBranchElimTest, DebugInformation) {
+  const std::string text = R"(
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+%ext = OpExtInstImport "OpenCL.DebugInfo.100"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %gl_FragColor
+OpExecutionMode %main OriginUpperLeft
+OpSource GLSL 140
+%name = OpString "test"
+OpName %main "main"
+OpName %gl_FragColor "gl_FragColor"
+%void = OpTypeVoid
+%5 = OpTypeFunction %void
+%bool = OpTypeBool
+%true = OpConstantTrue %bool
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%_ptr_Function_v4float = OpTypePointer Function %v4float
+%float_0 = OpConstant %float 0
+
+; CHECK: [[value:%\w+]] = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+%12 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+%float_1 = OpConstant %float 1
+%14 = OpConstantComposite %v4float %float_1 %float_1 %float_1 %float_1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%gl_FragColor = OpVariable %_ptr_Output_v4float Output
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%uint = OpTypeInt 32 0
+%uint_32 = OpConstant %uint 32
+
+%null_expr = OpExtInst %void %ext DebugExpression
+%src = OpExtInst %void %ext DebugSource %name
+%cu = OpExtInst %void %ext DebugCompilationUnit 1 4 %src HLSL
+%ty = OpExtInst %void %ext DebugTypeFunction FlagIsProtected|FlagIsPrivate %void
+%dbg_main = OpExtInst %void %ext DebugFunction %name %ty %src 0 0 %cu %name FlagIsProtected|FlagIsPrivate 0 %main
+
+; CHECK: [[bb1:%\w+]] = OpExtInst %void [[ext:%\w+]] DebugLexicalBlock [[src:%\w+]] 1 0 [[dbg_main:%\w+]]
+; CHECK: [[bb2:%\w+]] = OpExtInst %void [[ext]] DebugLexicalBlock [[src]] 2 0 [[dbg_main]]
+; CHECK: [[bb3:%\w+]] = OpExtInst %void [[ext]] DebugLexicalBlock [[src]] 3 0 [[dbg_main]]
+%bb1 = OpExtInst %void %ext DebugLexicalBlock %src 1 0 %dbg_main
+%bb2 = OpExtInst %void %ext DebugLexicalBlock %src 2 0 %dbg_main
+%bb3 = OpExtInst %void %ext DebugLexicalBlock %src 3 0 %dbg_main
+
+%dbg_f = OpExtInst %void %ext DebugTypeBasic %name %uint_32 Float
+; CHECK: [[dbg_foo:%\w+]] = OpExtInst %void [[ext]] DebugLocalVariable {{%\w+}} [[ty:%\w+]] [[src]] 0 0 [[dbg_main]]
+%dbg_foo = OpExtInst %void %ext DebugLocalVariable %name %dbg_f %src 0 0 %dbg_main FlagIsLocal
+; CHECK: [[dbg_bar:%\w+]] = OpExtInst %void [[ext]] DebugLocalVariable {{%\w+}} [[ty]] [[src]] 1 0 [[bb3]]
+%dbg_bar = OpExtInst %void %ext DebugLocalVariable %name %dbg_f %src 1 0 %bb3 FlagIsLocal
+
+%main = OpFunction %void None %5
+%17 = OpLabel
+; CHECK-NOT: DebugScope [[dbg_main]]
+; CHECK-NOT: OpLine {{%\w+}} 0 0
+%scope0 = OpExtInst %void %ext DebugScope %dbg_main
+OpLine %name 0 0
+OpSelectionMerge %18 None
+OpBranchConditional %true %19 %20
+%19 = OpLabel
+; CHECK: DebugScope [[bb1]]
+; CHECK: OpLine {{%\w+}} 1 0
+%scope1 = OpExtInst %void %ext DebugScope %bb1
+OpLine %name 1 0
+OpBranch %18
+%20 = OpLabel
+; CHECK-NOT: DebugScope [[bb2]]
+; CHECK-NOT: OpLine {{%\w+}} 2 0
+%scope2 = OpExtInst %void %ext DebugScope %bb2
+OpLine %name 2 0
+OpBranch %18
+%18 = OpLabel
+
+; CHECK: DebugScope [[bb3]]
+; CHECK: OpLine {{%\w+}} 3 0
+; CHECK: DebugValue [[dbg_foo]] [[value]]
+; CHECK: OpLine {{%\w+}} 4 0
+; CHECK: OpStore %gl_FragColor [[value]]
+; CHECK: DebugDeclare [[dbg_bar]] %gl_FragColor
+; CHECK: DebugValue [[dbg_bar]] [[value]]
+%scope3 = OpExtInst %void %ext DebugScope %bb3
+OpLine %name 3 0
+%21 = OpPhi %v4float %12 %19 %14 %20
+%decl0 = OpExtInst %void %ext DebugValue %dbg_foo %21 %null_expr
+OpLine %name 4 0
+OpStore %gl_FragColor %21
+%decl1 = OpExtInst %void %ext DebugDeclare %dbg_bar %gl_FragColor %null_expr
+%decl2 = OpExtInst %void %ext DebugValue %dbg_bar %21 %null_expr
+OpLine %name 5 0
+OpReturn
+OpFunctionEnd
+)";
+
+  SinglePassRunAndMatch<DeadBranchElimPass>(text, true);
 }
 
 // TODO(greg-lunarg): Add tests to verify handling of these cases:

@@ -1,4 +1,6 @@
 // Copyright (c) 2017 Google Inc.
+// Modifications Copyright (C) 2020 Advanced Micro Devices, Inc. All rights
+// reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,7 +66,7 @@ TEST_P(CapabilityTest, TestCapabilityToString) {
   EXPECT_EQ(capability_str, result_str);
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     AllExtensions, ExtensionTest,
     ValuesIn(std::vector<std::pair<Extension, std::string>>({
         {Extension::kSPV_KHR_16bit_storage, "SPV_KHR_16bit_storage"},
@@ -89,13 +91,13 @@ INSTANTIATE_TEST_CASE_P(
         {Extension::kSPV_KHR_8bit_storage, "SPV_KHR_8bit_storage"},
     })));
 
-INSTANTIATE_TEST_CASE_P(UnknownExtensions, UnknownExtensionTest,
-                        Values("", "SPV_KHR_", "SPV_KHR_device_group_ERROR",
-                               /*alphabetically before all extensions*/ "A",
-                               /*alphabetically after all extensions*/ "Z",
-                               "SPV_ERROR_random_string_hfsdklhlktherh"));
+INSTANTIATE_TEST_SUITE_P(UnknownExtensions, UnknownExtensionTest,
+                         Values("", "SPV_KHR_", "SPV_KHR_device_group_ERROR",
+                                /*alphabetically before all extensions*/ "A",
+                                /*alphabetically after all extensions*/ "Z",
+                                "SPV_ERROR_random_string_hfsdklhlktherh"));
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     AllCapabilities, CapabilityTest,
     ValuesIn(std::vector<std::pair<SpvCapability, std::string>>(
         {{SpvCapabilityMatrix, "Matrix"},
@@ -177,7 +179,12 @@ INSTANTIATE_TEST_CASE_P(
          {SpvCapabilityStoragePushConstant16, "StoragePushConstant16"},
          {SpvCapabilityStorageInputOutput16, "StorageInputOutput16"},
          {SpvCapabilityDeviceGroup, "DeviceGroup"},
+         {SpvCapabilityAtomicFloat32AddEXT, "AtomicFloat32AddEXT"},
+         {SpvCapabilityAtomicFloat64AddEXT, "AtomicFloat64AddEXT"},
+         {SpvCapabilityAtomicFloat32MinMaxEXT, "AtomicFloat32MinMaxEXT"},
+         {SpvCapabilityAtomicFloat64MinMaxEXT, "AtomicFloat64MinMaxEXT"},
          {SpvCapabilityMultiView, "MultiView"},
+         {SpvCapabilityInt64ImageEXT, "Int64ImageEXT"},
          {SpvCapabilitySampleMaskOverrideCoverageNV,
           "SampleMaskOverrideCoverageNV"},
          {SpvCapabilityGeometryShaderPassthroughNV,
@@ -189,7 +196,7 @@ INSTANTIATE_TEST_CASE_P(
           "ShaderViewportIndexLayerEXT"},
          {SpvCapabilityShaderViewportMaskNV, "ShaderViewportMaskNV"},
          {SpvCapabilityShaderStereoViewNV, "ShaderStereoViewNV"},
-         {SpvCapabilityPerViewAttributesNV, "PerViewAttributesNV"}})), );
+         {SpvCapabilityPerViewAttributesNV, "PerViewAttributesNV"}})));
 
 }  // namespace
 }  // namespace spvtools

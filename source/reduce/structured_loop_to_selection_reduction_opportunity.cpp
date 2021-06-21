@@ -23,7 +23,6 @@ namespace reduce {
 
 namespace {
 const uint32_t kMergeNodeIndex = 0;
-const uint32_t kContinueNodeIndex = 1;
 }  // namespace
 
 bool StructuredLoopToSelectionReductionOpportunity::PreconditionHolds() {
@@ -43,29 +42,27 @@ void StructuredLoopToSelectionReductionOpportunity::Apply() {
 
   // (1) Redirect edges that point to the loop's continue target to their
   // closest merge block.
-  RedirectToClosestMergeBlock(
-      loop_construct_header_->GetLoopMergeInst()->GetSingleWordOperand(
-          kContinueNodeIndex));
+  RedirectToClosestMergeBlock(loop_construct_header_->ContinueBlockId());
 
   // (2) Redirect edges that point to the loop's merge block to their closest
   // merge block (which might be that of an enclosing selection, for instance).
-  RedirectToClosestMergeBlock(
-      loop_construct_header_->GetLoopMergeInst()->GetSingleWordOperand(
-          kMergeNodeIndex));
+  RedirectToClosestMergeBlock(loop_construct_header_->MergeBlockId());
 
   // (3) Turn the loop construct header into a selection.
   ChangeLoopToSelection();
 
   // We have made control flow changes that do not preserve the analyses that
   // were performed.
-  context_->InvalidateAnalysesExceptFor(IRContext::Analysis::kAnalysisNone);
+  context_->InvalidateAnalysesExceptFor(
+      opt::IRContext::Analysis::kAnalysisNone);
 
   // (4) By changing CFG edges we may have created scenarios where ids are used
   // without being dominated; we fix instances of this.
   FixNonDominatedIdUses();
 
   // Invalidate the analyses we just used.
-  context_->InvalidateAnalysesExceptFor(IRContext::Analysis::kAnalysisNone);
+  context_->InvalidateAnalysesExceptFor(
+      opt::IRContext::Analysis::kAnalysisNone);
 }
 
 void StructuredLoopToSelectionReductionOpportunity::RedirectToClosestMergeBlock(
@@ -127,12 +124,8 @@ void StructuredLoopToSelectionReductionOpportunity::RedirectEdge(
 
   // original_target_id must either be the merge target or continue construct
   // for the loop being operated on.
-  assert(original_target_id ==
-             loop_construct_header_->GetMergeInst()->GetSingleWordOperand(
-                 kMergeNodeIndex) ||
-         original_target_id ==
-             loop_construct_header_->GetMergeInst()->GetSingleWordOperand(
-                 kContinueNodeIndex));
+  assert(original_target_id == loop_construct_header_->MergeBlockId() ||
+         original_target_id == loop_construct_header_->ContinueBlockId());
 
   auto terminator = context_->cfg()->block(source_id)->terminator();
 
@@ -172,30 +165,14 @@ void StructuredLoopToSelectionReductionOpportunity::RedirectEdge(
 }
 
 void StructuredLoopToSelectionReductionOpportunity::
-    AdaptPhiInstructionsForRemovedEdge(uint32_t from_id, BasicBlock* to_block) {
-  to_block->ForEachPhiInst([&from_id](Instruction* phi_inst) {
-    Instruction::OperandList new_in_operands;
-    // Go through the OpPhi's input operands in (variable, parent) pairs.
-    for (uint32_t index = 0; index < phi_inst->NumInOperands(); index += 2) {
-      // Keep all pairs where the parent is not the block from which the edge
-      // is being removed.
-      if (phi_inst->GetInOperand(index + 1).words[0] != from_id) {
-        new_in_operands.push_back(phi_inst->GetInOperand(index));
-        new_in_operands.push_back(phi_inst->GetInOperand(index + 1));
-      }
-    }
-    phi_inst->SetInOperands(std::move(new_in_operands));
-  });
-}
-
-void StructuredLoopToSelectionReductionOpportunity::
-    AdaptPhiInstructionsForAddedEdge(uint32_t from_id, BasicBlock* to_block) {
-  to_block->ForEachPhiInst([this, &from_id](Instruction* phi_inst) {
+    AdaptPhiInstructionsForAddedEdge(uint32_t from_id,
+                                     opt::BasicBlock* to_block) {
+  to_block->ForEachPhiInst([this, &from_id](opt::Instruction* phi_inst) {
     // Add to the phi operand an (undef, from_id) pair to reflect the added
     // edge.
     auto undef_id = FindOrCreateGlobalUndef(context_, phi_inst->type_id());
-    phi_inst->AddOperand(Operand(SPV_OPERAND_TYPE_ID, {undef_id}));
-    phi_inst->AddOperand(Operand(SPV_OPERAND_TYPE_ID, {from_id}));
+    phi_inst->AddOperand(opt::Operand(SPV_OPERAND_TYPE_ID, {undef_id}));
+    phi_inst->AddOperand(opt::Operand(SPV_OPERAND_TYPE_ID, {from_id}));
   });
 }
 
@@ -217,11 +194,11 @@ void StructuredLoopToSelectionReductionOpportunity::ChangeLoopToSelection() {
   // the "else" branch be the merge block.
   auto terminator = loop_construct_header_->terminator();
   if (terminator->opcode() == SpvOpBranch) {
-    analysis::Bool temp;
-    const analysis::Bool* bool_type =
+    opt::analysis::Bool temp;
+    const opt::analysis::Bool* bool_type =
         context_->get_type_mgr()->GetRegisteredType(&temp)->AsBool();
     auto const_mgr = context_->get_constant_mgr();
-    auto true_const = const_mgr->GetConstant(bool_type, {true});
+    auto true_const = const_mgr->GetConstant(bool_type, {1});
     auto true_const_result_id =
         const_mgr->GetDefiningInstruction(true_const)->result_id();
     auto original_branch_id = terminator->GetSingleWordOperand(0);
@@ -248,8 +225,12 @@ void StructuredLoopToSelectionReductionOpportunity::FixNonDominatedIdUses() {
         continue;
       }
       context_->get_def_use_mgr()->ForEachUse(&def, [this, &block, &def](
-                                                        Instruction* use,
+                                                        opt::Instruction* use,
                                                         uint32_t index) {
+        // Ignore uses outside of blocks, such as in OpDecorate.
+        if (context_->get_instr_block(use) == nullptr) {
+          return;
+        }
         // If a use is not appropriately dominated by its definition,
         // replace the use with an OpUndef, unless the definition is an
         // access chain, in which case replace it with some (possibly fresh)
@@ -262,16 +243,19 @@ void StructuredLoopToSelectionReductionOpportunity::FixNonDominatedIdUses() {
               case SpvStorageClassFunction:
                 use->SetOperand(
                     index, {FindOrCreateFunctionVariable(
+                               context_, enclosing_function_,
                                context_->get_type_mgr()->GetId(pointer_type))});
                 break;
               default:
                 // TODO(2183) Need to think carefully about whether it makes
-                // sense to add new variables for all storage classes; it's fine
-                // for Private but might not be OK for input/output storage
-                // classes for example.
+                //  sense to add new variables for all storage classes; it's
+                //  fine for Private but might not be OK for input/output
+                //  storage classes for example.
                 use->SetOperand(
                     index, {FindOrCreateGlobalVariable(
+                               context_,
                                context_->get_type_mgr()->GetId(pointer_type))});
+                break;
                 break;
             }
           } else {
@@ -285,9 +269,10 @@ void StructuredLoopToSelectionReductionOpportunity::FixNonDominatedIdUses() {
 }
 
 bool StructuredLoopToSelectionReductionOpportunity::
-    DefinitionSufficientlyDominatesUse(Instruction* def, Instruction* use,
+    DefinitionSufficientlyDominatesUse(opt::Instruction* def,
+                                       opt::Instruction* use,
                                        uint32_t use_index,
-                                       BasicBlock& def_block) {
+                                       opt::BasicBlock& def_block) {
   if (use->opcode() == SpvOpPhi) {
     // A use in a phi doesn't need to be dominated by its definition, but the
     // associated parent block does need to be dominated by the definition.
@@ -297,63 +282,6 @@ bool StructuredLoopToSelectionReductionOpportunity::
   // In non-phi cases, a use needs to be dominated by its definition.
   return context_->GetDominatorAnalysis(enclosing_function_)
       ->Dominates(def, use);
-}
-
-uint32_t
-StructuredLoopToSelectionReductionOpportunity::FindOrCreateGlobalVariable(
-    uint32_t pointer_type_id) {
-  for (auto& inst : context_->module()->types_values()) {
-    if (inst.opcode() != SpvOpVariable) {
-      continue;
-    }
-    if (inst.type_id() == pointer_type_id) {
-      return inst.result_id();
-    }
-  }
-  const uint32_t variable_id = context_->TakeNextId();
-  std::unique_ptr<Instruction> variable_inst(
-      new Instruction(context_, SpvOpVariable, pointer_type_id, variable_id,
-                      {{SPV_OPERAND_TYPE_STORAGE_CLASS,
-                        {(uint32_t)context_->get_type_mgr()
-                             ->GetType(pointer_type_id)
-                             ->AsPointer()
-                             ->storage_class()}}}));
-  context_->module()->AddGlobalValue(std::move(variable_inst));
-  return variable_id;
-}
-
-uint32_t
-StructuredLoopToSelectionReductionOpportunity::FindOrCreateFunctionVariable(
-    uint32_t pointer_type_id) {
-  // The pointer type of a function variable must have Function storage class.
-  assert(context_->get_type_mgr()
-             ->GetType(pointer_type_id)
-             ->AsPointer()
-             ->storage_class() == SpvStorageClassFunction);
-
-  // Go through the instructions in the function's first block until we find a
-  // suitable variable, or go past all the variables.
-  BasicBlock::iterator iter = enclosing_function_->begin()->begin();
-  for (;; ++iter) {
-    // We will either find a suitable variable, or find a non-variable
-    // instruction; we won't exhaust all instructions.
-    assert(iter != enclosing_function_->begin()->end());
-    if (iter->opcode() != SpvOpVariable) {
-      // If we see a non-variable, we have gone through all the variables.
-      break;
-    }
-    if (iter->type_id() == pointer_type_id) {
-      return iter->result_id();
-    }
-  }
-  // At this point, iter refers to the first non-function instruction of the
-  // function's entry block.
-  const uint32_t variable_id = context_->TakeNextId();
-  std::unique_ptr<Instruction> variable_inst(new Instruction(
-      context_, SpvOpVariable, pointer_type_id, variable_id,
-      {{SPV_OPERAND_TYPE_STORAGE_CLASS, {SpvStorageClassFunction}}}));
-  iter->InsertBefore(std::move(variable_inst));
-  return variable_id;
 }
 
 }  // namespace reduce

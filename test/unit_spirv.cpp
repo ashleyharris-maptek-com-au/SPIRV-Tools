@@ -15,12 +15,13 @@
 #include "test/unit_spirv.h"
 
 #include "gmock/gmock.h"
+#include "source/util/string_utils.h"
 #include "test/test_fixture.h"
 
 namespace spvtools {
 namespace {
 
-using spvtest::MakeVector;
+using utils::MakeVector;
 using ::testing::Eq;
 using Words = std::vector<uint32_t>;
 
@@ -44,11 +45,6 @@ TEST(WordVectorPrintTo, PreservesFlagsAndFill) {
   s << std::setw(4) << 9;
 
   EXPECT_THAT(s.str(), Eq("xx10 0x0000000a 0x00000010 xx11"));
-}
-
-TEST_P(RoundTripTest, Sample) {
-  EXPECT_THAT(EncodeAndDecodeSuccessfully(GetParam()), Eq(GetParam()))
-      << GetParam();
 }
 
 }  // namespace

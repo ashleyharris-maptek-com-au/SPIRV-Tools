@@ -21,14 +21,16 @@ set SRC=%cd%\github\SPIRV-Tools
 set BUILD_TYPE=%1
 set VS_VERSION=%2
 
-:: Force usage of python 2.7 rather than 3.6
-set PATH=C:\python27;%PATH%
+:: Force usage of python 3.6
+set PATH=C:\python36;"C:\Program Files\CMake\bin";%PATH%
 
 cd %SRC%
 git clone --depth=1 https://github.com/KhronosGroup/SPIRV-Headers external/spirv-headers
-git clone --depth=1 https://github.com/google/googletest          external/googletest
+git clone https://github.com/google/googletest          external/googletest
+cd external && cd googletest && git reset --hard 1fb1bb23bb8418dc73a5a9a82bbed31dc610fec7 && cd .. && cd ..
 git clone --depth=1 https://github.com/google/effcee              external/effcee
 git clone --depth=1 https://github.com/google/re2                 external/re2
+git clone --depth=1 --branch v3.13.0 https://github.com/protocolbuffers/protobuf external/protobuf
 
 :: #########################################
 :: set up msvc build env
@@ -39,9 +41,6 @@ if %VS_VERSION% == 2017 (
 ) else if %VS_VERSION% == 2015 (
   call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" x64
   echo "Using VS 2015..."
-) else if %VS_VERSION% == 2013 (
-  call "C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\vcvarsall.bat" x64
-  echo "Using VS 2013..."
 )
 
 cd %SRC%
@@ -58,33 +57,40 @@ if "%KOKORO_GITHUB_COMMIT%." == "." (
   set BUILD_SHA=%KOKORO_GITHUB_COMMIT%
 )
 
-:: Skip building tests for VS2013
-if %VS_VERSION% == 2013 (
-  cmake -GNinja -DSPIRV_SKIP_TESTS=ON -DSPIRV_BUILD_COMPRESSION=ON -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_INSTALL_PREFIX=install -DRE2_BUILD_TESTING=OFF -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe ..
-) else (
-  cmake -GNinja -DSPIRV_BUILD_COMPRESSION=ON -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_INSTALL_PREFIX=install -DRE2_BUILD_TESTING=OFF -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe ..
-)
+set CMAKE_FLAGS=-DCMAKE_INSTALL_PREFIX=%KOKORO_ARTIFACTS_DIR%\install -GNinja -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DRE2_BUILD_TESTING=OFF -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe
 
-if %ERRORLEVEL% GEQ 1 exit /b %ERRORLEVEL%
+:: Build spirv-fuzz
+set CMAKE_FLAGS=%CMAKE_FLAGS% -DSPIRV_BUILD_FUZZER=ON
+
+cmake %CMAKE_FLAGS% ..
+
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 echo "Build everything... %DATE% %TIME%"
 ninja
-if %ERRORLEVEL% GEQ 1 exit /b %ERRORLEVEL%
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 echo "Build Completed %DATE% %TIME%"
 
+:: This lets us use !ERRORLEVEL! inside an IF ... () and get the actual error at that point.
+setlocal ENABLEDELAYEDEXPANSION
+
 :: ################################################
-:: Run the tests (We no longer run tests on VS2013)
+:: Run the tests
 :: ################################################
-if NOT %VS_VERSION% == 2013 (
-  echo "Running Tests... %DATE% %TIME%"
-  ctest -C %BUILD_TYPE% --output-on-failure --timeout 300
-  if %ERRORLEVEL% GEQ 1 exit /b %ERRORLEVEL%
-  echo "Tests Completed %DATE% %TIME%"
-)
+echo "Running Tests... %DATE% %TIME%"
+ctest -C %BUILD_TYPE% --output-on-failure --timeout 300
+if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
+echo "Tests Completed %DATE% %TIME%"
+
+:: ################################################
+:: Install and package.
+:: ################################################
+ninja install
+cd %KOKORO_ARTIFACTS_DIR%
+zip -r install.zip install
 
 :: Clean up some directories.
 rm -rf %SRC%\build
 rm -rf %SRC%\external
 
-exit /b %ERRORLEVEL%
-
+exit /b 0

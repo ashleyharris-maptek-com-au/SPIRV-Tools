@@ -26,7 +26,11 @@ namespace val {
 namespace {
 
 using ::testing::HasSubstr;
+using ::testing::Values;
 using ValidateStorage = spvtest::ValidateBase<std::string>;
+using ValidateStorageClass =
+    spvtest::ValidateBase<std::tuple<std::string, bool, bool, std::string>>;
+using ValidateStorageExecutionModel = spvtest::ValidateBase<std::string>;
 
 TEST_F(ValidateStorage, FunctionStorageInsideFunction) {
   char str[] = R"(
@@ -137,7 +141,7 @@ TEST_P(ValidateStorage, OtherStorageInsideFunction) {
       "Variables must have a function[7] storage class inside of a function"));
 }
 
-INSTANTIATE_TEST_CASE_P(MatrixOp, ValidateStorage,
+INSTANTIATE_TEST_SUITE_P(MatrixOp, ValidateStorage,
                         ::testing::Values(
                              "Input",
                              "Uniform",
@@ -147,13 +151,14 @@ INSTANTIATE_TEST_CASE_P(MatrixOp, ValidateStorage,
                              "Private",
                              "PushConstant",
                              "AtomicCounter",
-                             "Image"),);
+                             "Image"));
 // clang-format on
 
 TEST_F(ValidateStorage, GenericVariableOutsideFunction) {
   const auto str = R"(
           OpCapability Kernel
           OpCapability Linkage
+          OpCapability GenericPointer
           OpMemoryModel Logical OpenCL
 %intt   = OpTypeInt 32 0
 %ptrt   = OpTypePointer Function %intt
@@ -169,6 +174,7 @@ TEST_F(ValidateStorage, GenericVariableInsideFunction) {
   const auto str = R"(
           OpCapability Shader
           OpCapability Linkage
+          OpCapability GenericPointer
           OpMemoryModel Logical GLSL450
 %intt   = OpTypeInt 32 1
 %voidt  = OpTypeVoid
@@ -181,10 +187,109 @@ TEST_F(ValidateStorage, GenericVariableInsideFunction) {
           OpFunctionEnd
 )";
   CompileSuccessfully(str);
-  ASSERT_EQ(SPV_ERROR_INVALID_BINARY, ValidateInstructions());
+  EXPECT_EQ(SPV_ERROR_INVALID_BINARY, ValidateInstructions());
   EXPECT_THAT(getDiagnosticString(),
               HasSubstr("OpVariable storage class cannot be Generic"));
 }
+
+TEST_F(ValidateStorage, RelaxedLogicalPointerFunctionParam) {
+  const auto str = R"(
+          OpCapability Shader
+          OpCapability Linkage
+          OpMemoryModel Logical GLSL450
+%intt   = OpTypeInt 32 1
+%voidt  = OpTypeVoid
+%ptrt   = OpTypePointer Function %intt
+%vfunct = OpTypeFunction %voidt
+%vifunct = OpTypeFunction %voidt %ptrt
+%wgroupptrt = OpTypePointer Workgroup %intt
+%wgroup = OpVariable %wgroupptrt Workgroup
+%main   = OpFunction %voidt None %vfunct
+%mainl  = OpLabel
+%ret    = OpFunctionCall %voidt %func %wgroup
+          OpReturn
+          OpFunctionEnd
+%func   = OpFunction %voidt None %vifunct
+%arg    = OpFunctionParameter %ptrt
+%funcl  = OpLabel
+          OpReturn
+          OpFunctionEnd
+)";
+  CompileSuccessfully(str);
+  getValidatorOptions()->before_hlsl_legalization = true;
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateStorage, RelaxedLogicalPointerFunctionParamBad) {
+  const auto str = R"(
+          OpCapability Shader
+          OpCapability Linkage
+          OpMemoryModel Logical GLSL450
+%floatt = OpTypeFloat 32
+%intt   = OpTypeInt 32 1
+%voidt  = OpTypeVoid
+%ptrt   = OpTypePointer Function %intt
+%vfunct = OpTypeFunction %voidt
+%vifunct = OpTypeFunction %voidt %ptrt
+%wgroupptrt = OpTypePointer Workgroup %floatt
+%wgroup = OpVariable %wgroupptrt Workgroup
+%main   = OpFunction %voidt None %vfunct
+%mainl  = OpLabel
+%ret    = OpFunctionCall %voidt %func %wgroup
+          OpReturn
+          OpFunctionEnd
+%func   = OpFunction %voidt None %vifunct
+%arg    = OpFunctionParameter %ptrt
+%funcl  = OpLabel
+          OpReturn
+          OpFunctionEnd
+)";
+  CompileSuccessfully(str);
+  getValidatorOptions()->relax_logical_pointer = true;
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("OpFunctionCall Argument <id> '"));
+}
+
+TEST_P(ValidateStorageExecutionModel, VulkanOutsideStoreFailure) {
+  std::stringstream ss;
+  ss << R"(
+              OpCapability Shader
+              OpCapability RayTracingKHR
+              OpExtension "SPV_KHR_ray_tracing"
+              OpMemoryModel Logical GLSL450
+              OpEntryPoint )"
+     << GetParam() << R"(  %func "func" %output
+              OpDecorate %output Location 0
+%intt       = OpTypeInt 32 0
+%int0       = OpConstant %intt 0
+%voidt      = OpTypeVoid
+%vfunct     = OpTypeFunction %voidt
+%outputptrt = OpTypePointer Output %intt
+%output     = OpVariable %outputptrt Output
+%func       = OpFunction %voidt None %vfunct
+%funcl      = OpLabel
+              OpStore %output %int0
+              OpReturn
+              OpFunctionEnd
+)";
+
+  CompileSuccessfully(ss.str(), SPV_ENV_VULKAN_1_0);
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_VULKAN_1_0));
+  EXPECT_THAT(getDiagnosticString(),
+              AnyVUID("VUID-StandaloneSpirv-None-04644"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("in Vulkan evironment, Output Storage Class must not be used "
+                "in RayGenerationKHR, IntersectionKHR, AnyHitKHR, "
+                "ClosestHitKHR, MissKHR, or CallableKHR execution models"));
+}
+
+INSTANTIATE_TEST_SUITE_P(MatrixExecutionModel, ValidateStorageExecutionModel,
+                         ::testing::Values("RayGenerationKHR",
+                                           "IntersectionKHR", "AnyHitKHR",
+                                           "ClosestHitKHR", "MissKHR",
+                                           "CallableKHR"));
 
 }  // namespace
 }  // namespace val

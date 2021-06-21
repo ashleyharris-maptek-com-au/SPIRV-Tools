@@ -23,8 +23,8 @@
 #include <vector>
 
 #include "gmock/gmock.h"
-
 #include "source/diagnostic.h"
+#include "source/spirv_target_env.h"
 #include "source/val/validate.h"
 #include "test/test_fixture.h"
 #include "test/unit_spirv.h"
@@ -103,6 +103,12 @@ class Block {
         }
         out << ss.str();
       } break;
+      case SpvOpLoopMerge: {
+        assert(successors_.size() == 2);
+        out << "OpLoopMerge %" + successors_[0].label_ + " %" +
+                   successors_[0].label_ + "None";
+      } break;
+
       case SpvOpReturn:
         assert(successors_.size() == 0);
         out << "OpReturn\n";
@@ -114,6 +120,10 @@ class Block {
       case SpvOpBranch:
         assert(successors_.size() == 1);
         out << "OpBranch %" + successors_.front().label_;
+        break;
+      case SpvOpKill:
+        assert(successors_.size() == 0);
+        out << "OpKill\n";
         break;
       default:
         assert(1 == 0 && "Unhandled");
@@ -144,13 +154,13 @@ Block& operator>>(Block& lhs, Block& successor) {
   return lhs;
 }
 
-const char* header(SpvCapability cap) {
-  static const char* shader_header =
+const std::string& GetDefaultHeader(SpvCapability cap) {
+  static const std::string shader_header =
       "OpCapability Shader\n"
       "OpCapability Linkage\n"
       "OpMemoryModel Logical GLSL450\n";
 
-  static const char* kernel_header =
+  static const std::string kernel_header =
       "OpCapability Kernel\n"
       "OpCapability Linkage\n"
       "OpMemoryModel Logical OpenCL\n";
@@ -158,8 +168,8 @@ const char* header(SpvCapability cap) {
   return (cap == SpvCapabilityShader) ? shader_header : kernel_header;
 }
 
-const char* types_consts() {
-  static const char* types =
+const std::string& types_consts() {
+  static const std::string types =
       "%voidt   = OpTypeVoid\n"
       "%boolt   = OpTypeBool\n"
       "%intt    = OpTypeInt 32 0\n"
@@ -167,13 +177,12 @@ const char* types_consts() {
       "%two     = OpConstant %intt 2\n"
       "%ptrt    = OpTypePointer Function %intt\n"
       "%funct   = OpTypeFunction %voidt\n";
-
   return types;
 }
 
-INSTANTIATE_TEST_CASE_P(StructuredControlFlow, ValidateCFG,
-                        ::testing::Values(SpvCapabilityShader,
-                                          SpvCapabilityKernel));
+INSTANTIATE_TEST_SUITE_P(StructuredControlFlow, ValidateCFG,
+                         ::testing::Values(SpvCapabilityShader,
+                                           SpvCapabilityKernel));
 
 TEST_P(ValidateCFG, LoopReachableFromEntryButNeverLeadingToReturn) {
   // In this case, the loop is reachable from a node without a predecessor,
@@ -270,7 +279,7 @@ TEST_P(ValidateCFG, Simple) {
     loop.SetBody("OpLoopMerge %merge %cont None\n");
   }
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("loop", "entry", "cont", "merge",
                             std::make_pair("func", "Main")) +
                     types_consts() +
@@ -293,7 +302,7 @@ TEST_P(ValidateCFG, Variable) {
 
   entry.SetBody("%var = OpVariable %ptrt Function\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps(std::make_pair("func", "Main")) + types_consts() +
                     " %func    = OpFunction %voidt None %funct\n";
   str += entry >> cont;
@@ -313,7 +322,7 @@ TEST_P(ValidateCFG, VariableNotInFirstBlockBad) {
   // This operation should only be performed in the entry block
   cont.SetBody("%var = OpVariable %ptrt Function\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps(std::make_pair("func", "Main")) + types_consts() +
                     " %func    = OpFunction %voidt None %funct\n";
 
@@ -323,11 +332,10 @@ TEST_P(ValidateCFG, VariableNotInFirstBlockBad) {
   str += "OpFunctionEnd\n";
 
   CompileSuccessfully(str);
-  ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
-  EXPECT_THAT(
-      getDiagnosticString(),
-      HasSubstr(
-          "Variables can only be defined in the first block of a function"));
+  ASSERT_EQ(SPV_ERROR_INVALID_DATA, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("All OpVariable instructions in a function must be the "
+                        "first instructions in the first block"));
 }
 
 TEST_P(ValidateCFG, BlockSelfLoopIsOk) {
@@ -339,7 +347,7 @@ TEST_P(ValidateCFG, BlockSelfLoopIsOk) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.SetBody("OpLoopMerge %merge %loop None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("loop", "merge", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -364,7 +372,7 @@ TEST_P(ValidateCFG, BlockAppearsBeforeDominatorBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) branch.SetBody("OpSelectionMerge %merge None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("cont", "branch", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -396,9 +404,10 @@ TEST_P(ValidateCFG, MergeBlockTargetedByMultipleHeaderBlocksBad) {
   // cannot share the same merge
   if (is_shader) selection.SetBody("OpSelectionMerge %merge None\n");
 
-  std::string str =
-      header(GetParam()) + nameOps("merge", std::make_pair("func", "Main")) +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("merge", std::make_pair("func", "Main")) +
+                    types_consts() +
+                    "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
   str += loop >> selection;
@@ -431,9 +440,10 @@ TEST_P(ValidateCFG, MergeBlockTargetedByMultipleHeaderBlocksSelectionBad) {
   // cannot share the same merge
   if (is_shader) loop.SetBody(" OpLoopMerge %merge %loop None\n");
 
-  std::string str =
-      header(GetParam()) + nameOps("merge", std::make_pair("func", "Main")) +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("merge", std::make_pair("func", "Main")) +
+                    types_consts() +
+                    "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> selection;
   str += selection >> std::vector<Block>({merge, loop});
@@ -457,7 +467,7 @@ TEST_P(ValidateCFG, BranchTargetFirstBlockBadSinceEntryBlock) {
   Block entry("entry");
   Block bad("bad");
   Block end("end", SpvOpReturn);
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "bad", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -477,11 +487,11 @@ TEST_P(ValidateCFG, BranchTargetFirstBlockBadSinceEntryBlock) {
 
 TEST_P(ValidateCFG, BranchTargetFirstBlockBadSinceValue) {
   Block entry("entry");
-  entry.SetBody("%undef = OpUndef %voidt\n");
+  entry.SetBody("%undef = OpUndef %boolt\n");
   Block bad("bad");
   Block end("end", SpvOpReturn);
-  Block badvalue("undef");  // This referenes the OpUndef.
-  std::string str = header(GetParam()) +
+  Block badvalue("undef");  // This references the OpUndef.
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "bad", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -493,13 +503,10 @@ TEST_P(ValidateCFG, BranchTargetFirstBlockBadSinceValue) {
   str += "OpFunctionEnd\n";
 
   CompileSuccessfully(str);
-  ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
-  EXPECT_THAT(
-      getDiagnosticString(),
-      MatchesRegex("Block\\(s\\) \\{11\\[%11\\]\\} are referenced but not "
-                   "defined in function .\\[%Main\\]\n  %Main = OpFunction "
-                   "%void None %10\n"))
-      << str;
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("'Target Label' operands for OpBranch must "
+                        "be the ID of an OpLabel instruction"));
 }
 
 TEST_P(ValidateCFG, BranchConditionalTrueTargetFirstBlockBad) {
@@ -510,7 +517,7 @@ TEST_P(ValidateCFG, BranchConditionalTrueTargetFirstBlockBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   bad.SetBody(" OpLoopMerge %entry %exit None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "bad", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -538,7 +545,7 @@ TEST_P(ValidateCFG, BranchConditionalFalseTargetFirstBlockBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   bad.SetBody("OpLoopMerge %merge %cont None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "bad", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -570,7 +577,7 @@ TEST_P(ValidateCFG, SwitchTargetFirstBlockBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   bad.SetBody("OpSelectionMerge %merge None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "bad", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -605,9 +612,10 @@ TEST_P(ValidateCFG, BranchToBlockInOtherFunctionBad) {
   Block middle2("middle2");
   Block end2("end2", SpvOpReturn);
 
-  std::string str =
-      header(GetParam()) + nameOps("middle2", std::make_pair("func", "Main")) +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("middle2", std::make_pair("func", "Main")) +
+                    types_consts() +
+                    "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> middle;
   str += middle >> std::vector<Block>({end, middle2});
@@ -640,7 +648,7 @@ TEST_P(ValidateCFG, HeaderDoesntDominatesMergeBad) {
 
   if (is_shader) head.AppendBody("OpSelectionMerge %merge None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("head", "merge", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -675,7 +683,7 @@ TEST_P(ValidateCFG, HeaderDoesntStrictlyDominateMergeBad) {
 
   if (is_shader) head.AppendBody("OpSelectionMerge %head None\n");
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("head", "exit", std::make_pair("func", "Main")) +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
@@ -697,8 +705,8 @@ TEST_P(ValidateCFG, HeaderDoesntStrictlyDominateMergeBad) {
   }
 }
 
-TEST_P(ValidateCFG, UnreachableMerge) {
-  bool is_shader = GetParam() == SpvCapabilityShader;
+std::string GetUnreachableMergeNoMergeInst(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
   Block entry("entry");
   Block branch("branch", SpvOpBranchConditional);
   Block t("t", SpvOpReturn);
@@ -706,13 +714,12 @@ TEST_P(ValidateCFG, UnreachableMerge) {
   Block merge("merge", SpvOpReturn);
 
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
-  if (is_shader) branch.AppendBody("OpSelectionMerge %merge None\n");
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpSelectionMerge %merge None\n");
 
-  std::string str = header(GetParam()) +
-                    nameOps("branch", "merge", std::make_pair("func", "Main")) +
-                    types_consts() +
-                    "%func    = OpFunction %voidt None %funct\n";
-
+  std::string str = header;
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts() + "%func    = OpFunction %voidt None %funct\n";
   str += entry >> branch;
   str += branch >> std::vector<Block>({t, f});
   str += t;
@@ -720,12 +727,126 @@ TEST_P(ValidateCFG, UnreachableMerge) {
   str += merge;
   str += "OpFunctionEnd\n";
 
-  CompileSuccessfully(str);
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeNoMergeInst) {
+  CompileSuccessfully(GetUnreachableMergeNoMergeInst(GetParam()));
   ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
-TEST_P(ValidateCFG, UnreachableMergeDefinedByOpUnreachable) {
-  bool is_shader = GetParam() == SpvCapabilityShader;
+std::string GetUnreachableMergeTerminatedBy(SpvCapability cap, SpvOp op) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranchConditional);
+  Block t("t", SpvOpReturn);
+  Block f("f", SpvOpReturn);
+  Block merge("merge", op);
+
+  entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpSelectionMerge %merge None\n");
+
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({t, f});
+  str += t;
+  str += f;
+  str += merge;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeTerminatedByOpUnreachable) {
+  CompileSuccessfully(
+      GetUnreachableMergeTerminatedBy(GetParam(), SpvOpUnreachable));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, UnreachableMergeTerminatedByOpKill) {
+  CompileSuccessfully(
+      GetUnreachableMergeTerminatedBy(SpvCapabilityShader, SpvOpKill));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_P(ValidateCFG, UnreachableMergeTerminatedByOpReturn) {
+  CompileSuccessfully(GetUnreachableMergeTerminatedBy(GetParam(), SpvOpReturn));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableContinueTerminatedBy(SpvCapability cap, SpvOp op) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", op);
+
+  if (op == SpvOpBranch) target >> branch;
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+
+  str += nameOps("branch", "merge", "target", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({merge});
+  str += merge;
+  str += target;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableContinueTerminatedBySpvOpUnreachable) {
+  CompileSuccessfully(
+      GetUnreachableContinueTerminatedBy(GetParam(), SpvOpUnreachable));
+  if (GetParam() == SpvCapabilityShader) {
+    ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+    EXPECT_THAT(getDiagnosticString(),
+                HasSubstr("targeted by 0 back-edge blocks"));
+  } else {
+    ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+  }
+}
+
+TEST_F(ValidateCFG, UnreachableContinueTerminatedBySpvOpKill) {
+  CompileSuccessfully(
+      GetUnreachableContinueTerminatedBy(SpvCapabilityShader, SpvOpKill));
+  ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("targeted by 0 back-edge blocks"));
+}
+
+TEST_P(ValidateCFG, UnreachableContinueTerminatedBySpvOpReturn) {
+  CompileSuccessfully(
+      GetUnreachableContinueTerminatedBy(GetParam(), SpvOpReturn));
+  if (GetParam() == SpvCapabilityShader) {
+    ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+    EXPECT_THAT(getDiagnosticString(),
+                HasSubstr("targeted by 0 back-edge blocks"));
+  } else {
+    ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+  }
+}
+
+TEST_P(ValidateCFG, UnreachableContinueTerminatedBySpvOpBranch) {
+  CompileSuccessfully(
+      GetUnreachableContinueTerminatedBy(GetParam(), SpvOpBranch));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableMergeUnreachableMergeInst(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block body("body", SpvOpReturn);
   Block entry("entry");
   Block branch("branch", SpvOpBranchConditional);
   Block t("t", SpvOpReturn);
@@ -733,13 +854,92 @@ TEST_P(ValidateCFG, UnreachableMergeDefinedByOpUnreachable) {
   Block merge("merge", SpvOpUnreachable);
 
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
-  if (is_shader) branch.AppendBody("OpSelectionMerge %merge None\n");
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpSelectionMerge %merge None\n");
 
-  std::string str = header(GetParam()) +
-                    nameOps("branch", "merge", std::make_pair("func", "Main")) +
-                    types_consts() +
-                    "%func    = OpFunction %voidt None %funct\n";
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += body;
+  str += merge;
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({t, f});
+  str += t;
+  str += f;
+  str += "OpFunctionEnd\n";
 
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeUnreachableMergeInst) {
+  CompileSuccessfully(GetUnreachableMergeUnreachableMergeInst(GetParam()));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableContinueUnreachableLoopInst(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block body("body", SpvOpReturn);
+  Block entry("entry");
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", SpvOpBranch);
+
+  target >> branch;
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+
+  str += nameOps("branch", "merge", "target", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += body;
+  str += target;
+  str += merge;
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({merge});
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableContinueUnreachableLoopInst) {
+  CompileSuccessfully(GetUnreachableContinueUnreachableLoopInst(GetParam()));
+  if (GetParam() == SpvCapabilityShader) {
+    // Shader causes additional structured CFG checks that cause a failure.
+    ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+    EXPECT_THAT(getDiagnosticString(),
+                HasSubstr("Back-edges (1[%branch] -> 3[%target]) can only be "
+                          "formed between a block and a loop header."));
+
+  } else {
+    ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+  }
+}
+
+std::string GetUnreachableMergeWithComplexBody(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranchConditional);
+  Block t("t", SpvOpReturn);
+  Block f("f", SpvOpReturn);
+  Block merge("merge", SpvOpUnreachable);
+
+  entry.AppendBody("%placeholder   = OpVariable %intptrt Function\n");
+  entry.AppendBody("%cond    = OpSLessThan %boolt %one %two\n");
+  merge.AppendBody("OpStore %placeholder %one\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpSelectionMerge %merge None\n");
+
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%intptrt = OpTypePointer Function %intt\n";
+  str += "%func    = OpFunction %voidt None %funct\n";
   str += entry >> branch;
   str += branch >> std::vector<Block>({t, f});
   str += t;
@@ -747,31 +947,273 @@ TEST_P(ValidateCFG, UnreachableMergeDefinedByOpUnreachable) {
   str += merge;
   str += "OpFunctionEnd\n";
 
-  CompileSuccessfully(str);
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeWithComplexBody) {
+  CompileSuccessfully(GetUnreachableMergeWithComplexBody(GetParam()));
   ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
-TEST_P(ValidateCFG, UnreachableBlock) {
+std::string GetUnreachableContinueWithComplexBody(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", SpvOpBranch);
+
+  target >> branch;
+
+  entry.AppendBody("%placeholder   = OpVariable %intptrt Function\n");
+  target.AppendBody("OpStore %placeholder %one\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+
+  str += nameOps("branch", "merge", "target", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%intptrt = OpTypePointer Function %intt\n";
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({merge});
+  str += merge;
+  str += target;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableContinueWithComplexBody) {
+  CompileSuccessfully(GetUnreachableContinueWithComplexBody(GetParam()));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableMergeWithBranchUse(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranchConditional);
+  Block t("t", SpvOpBranch);
+  Block f("f", SpvOpReturn);
+  Block merge("merge", SpvOpUnreachable);
+
+  entry.AppendBody("%cond    = OpSLessThan %boolt %one %two\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpSelectionMerge %merge None\n");
+
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({t, f});
+  str += t >> merge;
+  str += f;
+  str += merge;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeWithBranchUse) {
+  CompileSuccessfully(GetUnreachableMergeWithBranchUse(GetParam()));
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableMergeWithMultipleUses(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranchConditional);
+  Block t("t", SpvOpReturn);
+  Block f("f", SpvOpReturn);
+  Block merge("merge", SpvOpUnreachable);
+  Block duplicate("duplicate", SpvOpBranchConditional);
+
+  entry.AppendBody("%cond    = OpSLessThan %boolt %one %two\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader) {
+    branch.AppendBody("OpSelectionMerge %merge None\n");
+    duplicate.AppendBody("OpSelectionMerge %merge None\n");
+  }
+
+  str += nameOps("branch", "merge", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({t, f});
+  str += duplicate >> std::vector<Block>({t, f});
+  str += t;
+  str += f;
+  str += merge;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeWithMultipleUses) {
+  CompileSuccessfully(GetUnreachableMergeWithMultipleUses(GetParam()));
+  if (GetParam() == SpvCapabilityShader) {
+    ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+    EXPECT_THAT(getDiagnosticString(),
+                HasSubstr("is already a merge block for another header"));
+  } else {
+    ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+  }
+}
+
+std::string GetUnreachableContinueWithBranchUse(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block foo("foo", SpvOpBranch);
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", SpvOpBranch);
+
+  foo >> target;
+  target >> branch;
+
+  entry.AppendBody("%placeholder   = OpVariable %intptrt Function\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader)
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+
+  str += nameOps("branch", "merge", "target", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%intptrt = OpTypePointer Function %intt\n";
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({merge});
+  str += merge;
+  str += target;
+  str += foo;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableContinueWithBranchUse) {
+  CompileSuccessfully(GetUnreachableContinueWithBranchUse(GetParam()));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetReachableMergeAndContinue(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", SpvOpBranch);
+  Block body("body", SpvOpBranchConditional);
+  Block t("t", SpvOpBranch);
+  Block f("f", SpvOpBranch);
+
+  target >> branch;
+  body.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
+  t >> merge;
+  f >> target;
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader) {
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+    body.AppendBody("OpSelectionMerge %f None\n");
+  }
+
+  str += nameOps("branch", "merge", "target", "body", "t", "f",
+                 std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({body});
+  str += body >> std::vector<Block>({t, f});
+  str += t;
+  str += f;
+  str += merge;
+  str += target;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, ReachableMergeAndContinue) {
+  CompileSuccessfully(GetReachableMergeAndContinue(GetParam()));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableMergeAndContinue(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
+  Block entry("entry");
+  Block branch("branch", SpvOpBranch);
+  Block merge("merge", SpvOpReturn);
+  Block target("target", SpvOpBranch);
+  Block body("body", SpvOpBranchConditional);
+  Block t("t", SpvOpReturn);
+  Block f("f", SpvOpReturn);
+
+  target >> branch;
+  body.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
+
+  std::string str = header;
+  if (cap == SpvCapabilityShader) {
+    branch.AppendBody("OpLoopMerge %merge %target None\n");
+    body.AppendBody("OpSelectionMerge %target None\n");
+  }
+
+  str += nameOps("branch", "merge", "target", "body", "t", "f",
+                 std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
+  str += entry >> branch;
+  str += branch >> std::vector<Block>({body});
+  str += body >> std::vector<Block>({t, f});
+  str += t;
+  str += f;
+  str += merge;
+  str += target;
+  str += "OpFunctionEnd\n";
+
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableMergeAndContinue) {
+  CompileSuccessfully(GetUnreachableMergeAndContinue(GetParam()));
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+std::string GetUnreachableBlock(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
   Block entry("entry");
   Block unreachable("unreachable");
   Block exit("exit", SpvOpReturn);
 
-  std::string str =
-      header(GetParam()) +
-      nameOps("unreachable", "exit", std::make_pair("func", "Main")) +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
-
+  std::string str = header;
+  str += nameOps("unreachable", "exit", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
   str += entry >> exit;
   str += unreachable >> exit;
   str += exit;
   str += "OpFunctionEnd\n";
 
-  CompileSuccessfully(str);
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableBlock) {
+  CompileSuccessfully(GetUnreachableBlock(GetParam()));
   ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
-TEST_P(ValidateCFG, UnreachableBranch) {
-  bool is_shader = GetParam() == SpvCapabilityShader;
+std::string GetUnreachableBranch(SpvCapability cap) {
+  std::string header = GetDefaultHeader(cap);
+
   Block entry("entry");
   Block unreachable("unreachable", SpvOpBranchConditional);
   Block unreachablechildt("unreachablechildt");
@@ -780,11 +1222,13 @@ TEST_P(ValidateCFG, UnreachableBranch) {
   Block exit("exit", SpvOpReturn);
 
   unreachable.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
-  if (is_shader) unreachable.AppendBody("OpSelectionMerge %merge None\n");
-  std::string str =
-      header(GetParam()) +
-      nameOps("unreachable", "exit", std::make_pair("func", "Main")) +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  if (cap == SpvCapabilityShader)
+    unreachable.AppendBody("OpSelectionMerge %merge None\n");
+
+  std::string str = header;
+  str += nameOps("unreachable", "exit", std::make_pair("func", "Main"));
+  str += types_consts();
+  str += "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> exit;
   str +=
@@ -795,12 +1239,16 @@ TEST_P(ValidateCFG, UnreachableBranch) {
   str += exit;
   str += "OpFunctionEnd\n";
 
-  CompileSuccessfully(str);
+  return str;
+}
+
+TEST_P(ValidateCFG, UnreachableBranch) {
+  CompileSuccessfully(GetUnreachableBranch(GetParam()));
   ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
 TEST_P(ValidateCFG, EmptyFunction) {
-  std::string str = header(GetParam()) + std::string(types_consts()) +
+  std::string str = GetDefaultHeader(GetParam()) + std::string(types_consts()) +
                     R"(%func    = OpFunction %voidt None %funct
                   %l = OpLabel
                   OpReturn
@@ -819,7 +1267,7 @@ TEST_P(ValidateCFG, SingleBlockLoop) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.AppendBody("OpLoopMerge %exit %loop None\n");
 
-  std::string str = header(GetParam()) + std::string(types_consts()) +
+  std::string str = GetDefaultHeader(GetParam()) + std::string(types_consts()) +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
@@ -848,8 +1296,8 @@ TEST_P(ValidateCFG, NestedLoops) {
     loop2.SetBody("OpLoopMerge %loop2_merge %loop2 None\n");
   }
 
-  std::string str = header(GetParam()) + nameOps("loop2", "loop2_merge") +
-                    types_consts() +
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("loop2", "loop2_merge") + types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop1;
@@ -888,7 +1336,7 @@ TEST_P(ValidateCFG, NestedSelection) {
       if_blocks[i].SetBody("OpSelectionMerge %if_merge" + ss.str() + " None\n");
     merge_blocks.emplace_back("if_merge" + ss.str(), SpvOpBranch);
   }
-  std::string str = header(GetParam()) + std::string(types_consts()) +
+  std::string str = GetDefaultHeader(GetParam()) + std::string(types_consts()) +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> if_blocks[0];
@@ -913,25 +1361,27 @@ TEST_P(ValidateCFG, BackEdgeBlockDoesntPostDominateContinueTargetBad) {
   Block entry("entry");
   Block loop1("loop1", SpvOpBranchConditional);
   Block loop2("loop2", SpvOpBranchConditional);
-  Block loop2_merge("loop2_merge", SpvOpBranchConditional);
+  Block loop2_merge("loop2_merge");
+  Block loop1_cont("loop1_cont", SpvOpBranchConditional);
   Block be_block("be_block");
   Block exit("exit", SpvOpReturn);
 
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) {
-    loop1.SetBody("OpLoopMerge %exit %loop2_merge None\n");
+    loop1.SetBody("OpLoopMerge %exit %loop1_cont None\n");
     loop2.SetBody("OpLoopMerge %loop2_merge %loop2 None\n");
   }
 
-  std::string str = header(GetParam()) +
-                    nameOps("loop1", "loop2", "be_block", "loop2_merge") +
-                    types_consts() +
-                    "%func    = OpFunction %voidt None %funct\n";
+  std::string str =
+      GetDefaultHeader(GetParam()) +
+      nameOps("loop1", "loop2", "be_block", "loop1_cont", "loop2_merge") +
+      types_consts() + "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop1;
   str += loop1 >> std::vector<Block>({loop2, exit});
   str += loop2 >> std::vector<Block>({loop2, loop2_merge});
-  str += loop2_merge >> std::vector<Block>({be_block, exit});
+  str += loop2_merge >> loop1_cont;
+  str += loop1_cont >> std::vector<Block>({be_block, exit});
   str += be_block >> loop1;
   str += exit;
   str += "OpFunctionEnd";
@@ -941,7 +1391,7 @@ TEST_P(ValidateCFG, BackEdgeBlockDoesntPostDominateContinueTargetBad) {
     ASSERT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
     EXPECT_THAT(getDiagnosticString(),
                 MatchesRegex("The continue construct with the continue target "
-                             ".\\[%loop2_merge\\] is not post dominated by the "
+                             ".\\[%loop1_cont\\] is not post dominated by the "
                              "back-edge block .\\[%be_block\\]\n"
                              "  %be_block = OpLabel\n"));
   } else {
@@ -960,7 +1410,7 @@ TEST_P(ValidateCFG, BranchingToNonLoopHeaderBlockBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) split.SetBody("OpSelectionMerge %exit None\n");
 
-  std::string str = header(GetParam()) + nameOps("split", "f") +
+  std::string str = GetDefaultHeader(GetParam()) + nameOps("split", "f") +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
@@ -993,7 +1443,8 @@ TEST_P(ValidateCFG, BranchingToSameNonLoopHeaderBlockBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) split.SetBody("OpSelectionMerge %exit None\n");
 
-  std::string str = header(GetParam()) + nameOps("split") + types_consts() +
+  std::string str = GetDefaultHeader(GetParam()) + nameOps("split") +
+                    types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> split;
@@ -1025,8 +1476,8 @@ TEST_P(ValidateCFG, MultipleBackEdgeBlocksToLoopHeaderBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.SetBody("OpLoopMerge %merge %back0 None\n");
 
-  std::string str = header(GetParam()) + nameOps("loop", "back0", "back1") +
-                    types_consts() +
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("loop", "back0", "back1") + types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
@@ -1062,8 +1513,8 @@ TEST_P(ValidateCFG, ContinueTargetMustBePostDominatedByBackEdge) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.SetBody("OpLoopMerge %merge %cheader None\n");
 
-  std::string str = header(GetParam()) + nameOps("cheader", "be_block") +
-                    types_consts() +
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("cheader", "be_block") + types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
@@ -1097,7 +1548,7 @@ TEST_P(ValidateCFG, BranchOutOfConstructToMergeBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.SetBody("OpLoopMerge %merge %loop None\n");
 
-  std::string str = header(GetParam()) + nameOps("cont", "loop") +
+  std::string str = GetDefaultHeader(GetParam()) + nameOps("cont", "loop") +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
@@ -1132,7 +1583,7 @@ TEST_P(ValidateCFG, BranchOutOfConstructBad) {
   entry.SetBody("%cond    = OpSLessThan %boolt %one %two\n");
   if (is_shader) loop.SetBody("OpLoopMerge %merge %loop None\n");
 
-  std::string str = header(GetParam()) + nameOps("cont", "loop") +
+  std::string str = GetDefaultHeader(GetParam()) + nameOps("cont", "loop") +
                     types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
@@ -1213,7 +1664,7 @@ TEST_F(ValidateCFG, LoopWithZeroBackEdgesBad) {
 %funct   = OpTypeFunction %voidt
 %main    = OpFunction %voidt None %funct
 %loop    = OpLabel
-           OpLoopMerge %exit %exit None
+           OpLoopMerge %exit %loop None
            OpBranch %exit
 %exit    = OpLabel
            OpReturn
@@ -1283,7 +1734,7 @@ TEST_P(ValidateCFG,
     inner_head.SetBody("OpSelectionMerge %inner_merge None\n");
   }
 
-  std::string str = header(GetParam()) +
+  std::string str = GetDefaultHeader(GetParam()) +
                     nameOps("entry", "inner_merge", "exit") + types_consts() +
                     "%func    = OpFunction %voidt None %funct\n";
 
@@ -1299,13 +1750,10 @@ TEST_P(ValidateCFG,
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions()) << getDiagnosticString();
 }
 
-TEST_P(ValidateCFG, ContinueTargetCanBeMergeBlockForNestedStructureGood) {
-  // This example is valid.  It shows that the validator can't just add
-  // an edge from the loop head to the continue target.  If that edge
-  // is added, then the "if_merge" block is both the continue target
-  // for the loop and also the merge block for the nested selection, but
-  // then it wouldn't be dominated by "if_head", the header block for the
-  // nested selection.
+TEST_P(ValidateCFG, ContinueTargetCanBeMergeBlockForNestedStructure) {
+  // The continue construct cannot be the merge target of a nested selection
+  // because the loop construct must contain "if_merge" because it contains
+  // "if_head".
   bool is_shader = GetParam() == SpvCapabilityShader;
   Block entry("entry");
   Block loop("loop");
@@ -1321,7 +1769,7 @@ TEST_P(ValidateCFG, ContinueTargetCanBeMergeBlockForNestedStructureGood) {
   }
 
   std::string str =
-      header(GetParam()) +
+      GetDefaultHeader(GetParam()) +
       nameOps("entry", "loop", "if_head", "if_true", "if_merge", "merge") +
       types_consts() + "%func    = OpFunction %voidt None %funct\n";
 
@@ -1334,7 +1782,16 @@ TEST_P(ValidateCFG, ContinueTargetCanBeMergeBlockForNestedStructureGood) {
   str += "OpFunctionEnd";
 
   CompileSuccessfully(str);
-  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions()) << getDiagnosticString();
+  if (is_shader) {
+    EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+    EXPECT_THAT(
+        getDiagnosticString(),
+        HasSubstr("Header block 3[%if_head] is contained in the loop construct "
+                  "headed "
+                  "by 2[%loop], but its merge block 5[%if_merge] is not"));
+  } else {
+    EXPECT_THAT(SPV_SUCCESS, ValidateInstructions());
+  }
 }
 
 TEST_P(ValidateCFG, SingleLatchBlockMultipleBranchesToLoopHeader) {
@@ -1351,9 +1808,10 @@ TEST_P(ValidateCFG, SingleLatchBlockMultipleBranchesToLoopHeader) {
     loop.SetBody("OpLoopMerge %merge %latch None\n");
   }
 
-  std::string str =
-      header(GetParam()) + nameOps("entry", "loop", "latch", "merge") +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("entry", "loop", "latch", "merge") +
+                    types_consts() +
+                    "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
   str += loop >> std::vector<Block>({latch, merge});
@@ -1384,9 +1842,10 @@ TEST_P(ValidateCFG, SingleLatchBlockHeaderContinueTargetIsItselfGood) {
     loop.SetBody("OpLoopMerge %merge %loop None\n");
   }
 
-  std::string str =
-      header(GetParam()) + nameOps("entry", "loop", "latch", "merge") +
-      types_consts() + "%func    = OpFunction %voidt None %funct\n";
+  std::string str = GetDefaultHeader(GetParam()) +
+                    nameOps("entry", "loop", "latch", "merge") +
+                    types_consts() +
+                    "%func    = OpFunction %voidt None %funct\n";
 
   str += entry >> loop;
   str += loop >> latch;
@@ -1882,6 +2341,134 @@ OpFunctionEnd
   ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
+TEST_F(ValidateCFG, SwitchCaseOrderingBad1) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %default "default"
+OpName %other "other"
+%void = OpTypeVoid
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %undef %default 0 %other 1 %default
+%default = OpLabel
+OpBranch %other
+%other = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Case construct that targets 1[%default] has branches to the "
+                "case construct that targets 2[%other], but does not "
+                "immediately precede it in the OpSwitch's target list"));
+}
+
+TEST_F(ValidateCFG, SwitchCaseOrderingBad2) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %default "default"
+OpName %other "other"
+%void = OpTypeVoid
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %undef %default 0 %default 1 %other
+%other = OpLabel
+OpBranch %default
+%default = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Case construct that targets 2[%other] has branches to the "
+                "case construct that targets 1[%default], but does not "
+                "immediately precede it in the OpSwitch's target list"));
+}
+
+TEST_F(ValidateCFG, SwitchMultipleDefaultWithFallThroughGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %first "first"
+OpName %second "second"
+OpName %third "third"
+%void = OpTypeVoid
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %undef %second 0 %first 1 %second 2 %third
+%first = OpLabel
+OpBranch %second
+%second = OpLabel
+OpBranch %third
+%third = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, SwitchMultipleDefaultWithFallThroughBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %first "first"
+OpName %second "second"
+OpName %third "third"
+%void = OpTypeVoid
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %undef %second 0 %second 1 %first 2 %third
+%first = OpLabel
+OpBranch %second
+%second = OpLabel
+OpBranch %third
+%third = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+}
+
 TEST_F(ValidateCFG, GoodUnreachableSelection) {
   const std::string text = R"(
 OpCapability Shader
@@ -2060,7 +2647,1757 @@ TEST_F(ValidateCFG, KernelWithPhiPtr) {
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
-/// TODO(umar): Nested CFG constructs
+TEST_F(ValidateCFG, SwitchTargetMustBeLabel) {
+  const std::string text = R"(
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %1 "foo"
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+       %void = OpTypeVoid
+          %5 = OpTypeFunction %void
+          %1 = OpFunction %void None %5
+          %6 = OpLabel
+          %7 = OpCopyObject %uint %uint_0
+               OpSelectionMerge %8 None
+               OpSwitch %uint_0 %8 0 %7
+          %8 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("'Target Label' operands for OpSwitch must "
+                        "be IDs of an OpLabel instruction"));
+}
+
+TEST_F(ValidateCFG, BranchTargetMustBeLabel) {
+  const std::string text = R"(
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %1 "foo"
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+       %void = OpTypeVoid
+          %5 = OpTypeFunction %void
+          %1 = OpFunction %void None %5
+          %2 = OpLabel
+          %7 = OpCopyObject %uint %uint_0
+               OpBranch %7
+          %8 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("'Target Label' operands for OpBranch must "
+                        "be the ID of an OpLabel instruction"));
+}
+
+TEST_F(ValidateCFG, ReachableOpUnreachableOneBlock) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, ReachableOpUnreachableOpBranch) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %block
+%block = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, ReachableOpUnreachableOpBranchConditional) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %block None
+OpBranchConditional %undef %block %unreachable
+%block = OpLabel
+OpReturn
+%unreachable = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, ReachableOpUnreachableOpSwitch) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %block1 None
+OpSwitch %undef %block1 0 %unreachable 1 %block2
+%block1 = OpLabel
+OpReturn
+%unreachable = OpLabel
+OpUnreachable
+%block2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, ReachableOpUnreachableLoop) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %unreachable %loop None
+OpBranchConditional %undef %loop %unreachable
+%unreachable = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, UnreachableLoopBadBackedge) {
+  const std::string text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %2 "main"
+OpExecutionMode %2 OriginUpperLeft
+%4 = OpTypeVoid
+%5 = OpTypeFunction %4
+%8 = OpTypeBool
+%13 = OpConstantTrue %8
+%2 = OpFunction %4 None %5
+%14 = OpLabel
+OpSelectionMerge %15 None
+OpBranchConditional %13 %15 %15
+%16 = OpLabel
+OpLoopMerge %17 %18 None
+OpBranch %17
+%18 = OpLabel
+OpBranch %17
+%17 = OpLabel
+OpBranch %15
+%15 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  // The back-edge in this test is bad, but the validator fails to identify it
+  // because it is in an entirely unreachable section of code. Prior to #2488
+  // this code failed an assert in Construct::blocks().
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, OneContinueTwoBackedges) {
+  const std::string text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %1 "main"
+OpExecutionMode %1 LocalSize 1 1 1
+%void = OpTypeVoid
+%bool = OpTypeBool
+%true = OpConstantTrue %bool
+%5 = OpTypeFunction %void
+%1 = OpFunction %void None %5
+%6 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpLoopMerge %8 %9 None
+OpBranch %10
+%10 = OpLabel
+OpLoopMerge %11 %9 None
+OpBranchConditional %true %11 %9
+%9 = OpLabel
+OpBranchConditional %true %10 %7
+%11 = OpLabel
+OpBranch %8
+%8 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 9 branches to the loop construct, but not "
+                        "to the loop header <ID> 7"));
+}
+
+TEST_F(ValidateCFG, LoopMergeMergeBlockNotLabel) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%1 = OpLabel
+OpLoopMerge %undef %2 None
+OpBranchConditional %undef %2 %2
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("Merge Block 1[%undef] must be an OpLabel"));
+}
+
+TEST_F(ValidateCFG, LoopMergeContinueTargetNotLabel) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%1 = OpLabel
+OpLoopMerge %2 %undef None
+OpBranchConditional %undef %2 %2
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("Continue Target 1[%undef] must be an OpLabel"));
+}
+
+TEST_F(ValidateCFG, LoopMergeMergeBlockContinueTargetSameLabel) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%1 = OpLabel
+OpLoopMerge %2 %2 None
+OpBranchConditional %undef %2 %2
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Merge Block and Continue Target must be different ids"));
+}
+
+TEST_F(ValidateCFG, LoopMergeUnrollAndDontUnroll) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %1
+%1 = OpLabel
+OpLoopMerge %2 %3 Unroll|DontUnroll
+OpBranchConditional %undef %2 %3
+%3 = OpLabel
+OpBranch %1
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "Unroll and DontUnroll loop controls must not both be specified"));
+}
+
+TEST_F(ValidateCFG, LoopMergePeelCountAndDontUnroll) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %1
+%1 = OpLabel
+OpLoopMerge %2 %3 DontUnroll|PeelCount 1
+OpBranchConditional %undef %2 %3
+%3 = OpLabel
+OpBranch %1
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA,
+            ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "PeelCount and DontUnroll loop controls must not both be specified"));
+}
+
+TEST_F(ValidateCFG, LoopMergePartialCountAndDontUnroll) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %1
+%1 = OpLabel
+OpLoopMerge %2 %3 DontUnroll|PartialCount 1
+OpBranchConditional %undef %2 %3
+%3 = OpLabel
+OpBranch %1
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA,
+            ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("PartialCount and DontUnroll loop controls must not "
+                        "both be specified"));
+}
+
+TEST_F(ValidateCFG, LoopMergeIterationMultipleZero) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %1
+%1 = OpLabel
+OpLoopMerge %2 %3 IterationMultiple 0
+OpBranchConditional %undef %2 %3
+%3 = OpLabel
+OpBranch %1
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA,
+            ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "IterationMultiple loop control operand must be greater than zero"));
+}
+
+TEST_F(ValidateCFG, LoopMergeIterationMultipleZeroMoreOperands) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %undef "undef"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%func = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %1
+%1 = OpLabel
+OpLoopMerge %2 %3 MaxIterations|IterationMultiple 4 0
+OpBranchConditional %undef %2 %3
+%3 = OpLabel
+OpBranch %1
+%2 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA,
+            ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "IterationMultiple loop control operand must be greater than zero"));
+}
+
+TEST_F(ValidateCFG, LoopMergeTargetsHeader) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %loop %continue None
+OpBranch %body
+%continue = OpLabel
+OpBranch %loop
+%body = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Merge Block may not be the block containing the OpLoopMerge"));
+}
+
+TEST_F(ValidateCFG, InvalidSelectionExit) {
+  const std::string text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %1 "main"
+OpExecutionMode %1 OriginUpperLeft
+%2 = OpTypeVoid
+%3 = OpTypeBool
+%4 = OpConstantTrue %3
+%5 = OpTypeFunction %2
+%1 = OpFunction %2 None %5
+%6 = OpLabel
+OpSelectionMerge %7 None
+OpBranchConditional %4 %7 %8
+%8 = OpLabel
+OpSelectionMerge %9 None
+OpBranchConditional %4 %10 %9
+%10 = OpLabel
+OpBranch %7
+%9 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 10[%10] exits the selection headed by <ID> "
+                        "8[%8], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, InvalidLoopExit) {
+  const std::string text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %1 "main"
+OpExecutionMode %1 OriginUpperLeft
+%2 = OpTypeVoid
+%3 = OpTypeBool
+%4 = OpConstantTrue %3
+%5 = OpTypeFunction %2
+%1 = OpFunction %2 None %5
+%6 = OpLabel
+OpSelectionMerge %7 None
+OpBranchConditional %4 %7 %8
+%8 = OpLabel
+OpLoopMerge %9 %10 None
+OpBranchConditional %4 %9 %11
+%11 = OpLabel
+OpBranchConditional %4 %7 %10
+%10 = OpLabel
+OpBranch %8
+%9 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 11[%11] exits the loop headed by <ID> "
+                        "8[%8], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, InvalidContinueExit) {
+  const std::string text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %1 "main"
+OpExecutionMode %1 OriginUpperLeft
+%2 = OpTypeVoid
+%3 = OpTypeBool
+%4 = OpConstantTrue %3
+%5 = OpTypeFunction %2
+%1 = OpFunction %2 None %5
+%6 = OpLabel
+OpSelectionMerge %7 None
+OpBranchConditional %4 %7 %8
+%8 = OpLabel
+OpLoopMerge %9 %10 None
+OpBranchConditional %4 %9 %10
+%10 = OpLabel
+OpBranch %11
+%11 = OpLabel
+OpBranchConditional %4 %8 %7
+%9 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 11[%11] exits the continue headed by <ID> "
+                        "10[%10], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, InvalidSelectionExitBackedge) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeBool
+%3 = OpUndef %2
+%4 = OpTypeFunction %1
+%5 = OpFunction %1 None %4
+%6 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpLoopMerge %8 %9 None
+OpBranchConditional %3 %8 %9
+%9 = OpLabel
+OpSelectionMerge %10 None
+OpBranchConditional %3 %11 %12
+%11 = OpLabel
+OpBranch %13
+%12 = OpLabel
+OpBranch %13
+%13 = OpLabel
+OpBranch %7
+%10 = OpLabel
+OpUnreachable
+%8 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 13[%13] exits the selection headed by <ID> "
+                        "9[%9], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, BreakFromSwitch) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeBool
+%3 = OpTypeInt 32 0
+%4 = OpUndef %2
+%5 = OpUndef %3
+%6 = OpTypeFunction %1
+%7 = OpFunction %1 None %6
+%8 = OpLabel
+OpSelectionMerge %9 None
+OpSwitch %5 %9 0 %10
+%10 = OpLabel
+OpSelectionMerge %11 None
+OpBranchConditional %4 %11 %12
+%12 = OpLabel
+OpBranch %9
+%11 = OpLabel
+OpBranch %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, InvalidBreakFromSwitch) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeBool
+%3 = OpTypeInt 32 0
+%4 = OpUndef %2
+%5 = OpUndef %3
+%6 = OpTypeFunction %1
+%7 = OpFunction %1 None %6
+%8 = OpLabel
+OpSelectionMerge %9 None
+OpSwitch %5 %9 0 %10
+%10 = OpLabel
+OpSelectionMerge %11 None
+OpSwitch %5 %11 0 %12
+%12 = OpLabel
+OpBranch %9
+%11 = OpLabel
+OpBranch %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 12[%12] exits the selection headed by <ID> "
+                        "10[%10], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, BreakToOuterSwitch) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeBool
+%3 = OpTypeInt 32 0
+%4 = OpUndef %2
+%5 = OpUndef %3
+%6 = OpTypeFunction %1
+%7 = OpFunction %1 None %6
+%8 = OpLabel
+OpSelectionMerge %9 None
+OpSwitch %5 %9 0 %10
+%10 = OpLabel
+OpSelectionMerge %11 None
+OpSwitch %5 %11 0 %12
+%12 = OpLabel
+OpSelectionMerge %13 None
+OpBranchConditional %4 %13 %14
+%14 = OpLabel
+OpBranch %9
+%13 = OpLabel
+OpBranch %11
+%11 = OpLabel
+OpBranch %9
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 14[%14] exits the selection headed by <ID> "
+                        "10[%10], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, BreakToOuterLoop) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeBool
+%3 = OpUndef %2
+%4 = OpTypeFunction %1
+%5 = OpFunction %1 None %4
+%6 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpLoopMerge %8 %9 None
+OpBranch %10
+%10 = OpLabel
+OpLoopMerge %11 %12 None
+OpBranch %13
+%13 = OpLabel
+OpSelectionMerge %14 None
+OpBranchConditional %3 %14 %15
+%15 = OpLabel
+OpBranch %8
+%14 = OpLabel
+OpBranch %12
+%12 = OpLabel
+OpBranchConditional %3 %10 %11
+%11 = OpLabel
+OpBranch %9
+%9 = OpLabel
+OpBranchConditional %3 %7 %8
+%8 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 15[%15] exits the loop headed by <ID> "
+                        "10[%10], but not via a structured exit"));
+}
+
+TEST_F(ValidateCFG, ContinueFromNestedSelection) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%4 = OpFunction %void None %void_fn
+%5 = OpLabel
+OpBranch %48
+%48 = OpLabel
+OpLoopMerge %47 %50 None
+OpBranch %10
+%10 = OpLabel
+OpLoopMerge %12 %37 None
+OpBranchConditional %undef %11 %12
+%11 = OpLabel
+OpSelectionMerge %31 None
+OpBranchConditional %undef %30 %31
+%30 = OpLabel
+OpSelectionMerge %38 None
+OpBranchConditional %undef %36 %38
+%36 = OpLabel
+OpBranch %38
+%38 = OpLabel
+OpBranch %37
+%37 = OpLabel
+OpBranch %10
+%31 = OpLabel
+OpBranch %12
+%12 = OpLabel
+OpSelectionMerge %55 None
+OpBranchConditional %undef %47 %55
+%55 = OpLabel
+OpBranch %47
+%50 = OpLabel
+OpBranch %48
+%47 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeConditionalBranchBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranchConditional %undef %then %else
+%then = OpLabel
+OpReturn
+%else = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(), HasSubstr("Selection must be structured"));
+}
+
+TEST_F(ValidateCFG, MissingMergeSwitchBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSwitch %undef %then 0 %else
+%then = OpLabel
+OpReturn
+%else = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "OpSwitch must be preceeded by an OpSelectionMerge instruction"));
+}
+
+TEST_F(ValidateCFG, MissingMergeSwitchBad2) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSwitch %undef %then 0 %then 1 %then 2 %else
+%then = OpLabel
+OpReturn
+%else = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "OpSwitch must be preceeded by an OpSelectionMerge instruction"));
+}
+
+TEST_F(ValidateCFG, MissingMergeOneBranchToMergeGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %b3 None
+OpBranchConditional %undef %b1 %b2
+%b1 = OpLabel
+OpBranchConditional %undef %b2 %b3
+%b2 = OpLabel
+OpBranch %b3
+%b3 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeSameTargetConditionalBranchGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranchConditional %undef %then %then
+%then = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeOneTargetSwitchBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%int = OpTypeInt 32 0
+%undef = OpUndef %int
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSwitch %undef %then 0 %then 1 %then
+%then = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "OpSwitch must be preceeded by an OpSelectionMerge instruction"));
+}
+
+TEST_F(ValidateCFG, MissingMergeOneUnseenTargetSwitchBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%int = OpTypeInt 32 0
+%undef_int = OpUndef %int
+%bool = OpTypeBool
+%undef_bool = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpBranchConditional %undef_bool %merge %b1
+%b1 = OpLabel
+OpSwitch %undef_int %b2 0 %b2 1 %merge 2 %b2
+%b2 = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "OpSwitch must be preceeded by an OpSelectionMerge instruction"));
+}
+
+TEST_F(ValidateCFG, MissingMergeLoopBreakGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %exit %continue None
+OpBranch %body
+%body = OpLabel
+OpBranchConditional %undef %body2 %exit
+%body2 = OpLabel
+OpBranch %continue
+%continue = OpLabel
+OpBranch %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeLoopContinueGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %exit %continue None
+OpBranch %body
+%body = OpLabel
+OpBranchConditional %undef %body2 %continue
+%body2 = OpLabel
+OpBranch %continue
+%continue = OpLabel
+OpBranch %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeSwitchBreakGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%int = OpTypeInt 32 0
+%int_0 = OpConstant %int 0
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %int_0 %merge 1 %b1
+%b1 = OpLabel
+OpBranchConditional %undef %merge %b2
+%b2 = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeSwitchFallThroughGood) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%int = OpTypeInt 32 0
+%int_0 = OpConstant %int 0
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpSwitch %int_0 %b1 1 %b2
+%b1 = OpLabel
+OpBranchConditional %undef %b3 %b2
+%b2 = OpLabel
+OpBranch %merge
+%b3 = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, MissingMergeInALoopBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %exit %continue None
+OpBranch %body
+%body = OpLabel
+OpBranchConditional %undef %b1 %b2
+%b1 = OpLabel
+OpBranch %exit
+%b2 = OpLabel
+OpBranch %continue
+%continue = OpLabel
+OpBranch %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(), HasSubstr("Selection must be structured"));
+}
+
+TEST_F(ValidateCFG, MissingMergeCrissCrossBad) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpSelectionMerge %merge None
+OpBranchConditional %undef %b1 %b2
+%b1 = OpLabel
+OpBranchConditional %undef %b3 %b4
+%b2 = OpLabel
+OpBranchConditional %undef %b3 %b4
+%b3 = OpLabel
+OpBranch %merge
+%b4 = OpLabel
+OpBranch %merge
+%merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(), HasSubstr("Selection must be structured"));
+}
+
+TEST_F(ValidateCFG, ContinueCannotBeSelectionMergeTarget) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %loop "loop"
+OpName %continue "continue"
+OpName %body "body"
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %exit %continue None
+OpBranch %body
+%body = OpLabel
+OpSelectionMerge %continue None
+OpBranchConditional %undef %exit %continue
+%continue = OpLabel
+OpBranch %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "Header block 3[%body] is contained in the loop construct headed by "
+          "1[%loop], but its merge block 2[%continue] is not"));
+}
+
+TEST_F(ValidateCFG, ContinueCannotBeLoopMergeTarget) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %loop "loop"
+OpName %continue "continue"
+OpName %inner "inner"
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%func = OpFunction %void None %void_fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+OpLoopMerge %exit %continue None
+OpBranchConditional %undef %exit %inner
+%inner = OpLabel
+OpLoopMerge %continue %inner None
+OpBranchConditional %undef %inner %continue
+%continue = OpLabel
+OpBranch %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr(
+          "Header block 3[%inner] is contained in the loop construct headed by "
+          "1[%loop], but its merge block 2[%continue] is not"));
+}
+
+TEST_F(ValidateCFG, ExitFromConstructWhoseHeaderIsAMerge) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%2 = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%4 = OpUndef %int
+%bool = OpTypeBool
+%6 = OpUndef %bool
+%7 = OpFunction %void None %2
+%8 = OpLabel
+OpSelectionMerge %9 None
+OpSwitch %4 %10 0 %11
+%10 = OpLabel
+OpBranch %9
+%11 = OpLabel
+OpBranch %12
+%12 = OpLabel
+OpLoopMerge %13 %14 None
+OpBranch %15
+%15 = OpLabel
+OpSelectionMerge %16 None
+OpSwitch %4 %17 1 %18 2 %19
+%17 = OpLabel
+OpBranch %16
+%18 = OpLabel
+OpBranch %14
+%19 = OpLabel
+OpBranch %16
+%16 = OpLabel
+OpBranch %14
+%14 = OpLabel
+OpBranchConditional %6 %12 %13
+%13 = OpLabel
+OpSelectionMerge %20 None
+OpBranchConditional %6 %21 %20
+%21 = OpLabel
+OpBranch %9
+%20 = OpLabel
+OpBranch %10
+%9 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, ExitFromConstructWhoseHeaderIsAMerge2) {
+  const std::string text = R"(
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %2 "main"
+               OpExecutionMode %2 OriginUpperLeft
+       %void = OpTypeVoid
+          %4 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+          %6 = OpUndef %int
+       %bool = OpTypeBool
+          %8 = OpUndef %bool
+          %2 = OpFunction %void None %4
+          %9 = OpLabel
+               OpSelectionMerge %10 None
+               OpSwitch %6 %11 0 %12
+         %11 = OpLabel
+               OpBranch %10
+         %12 = OpLabel
+               OpBranch %13
+         %13 = OpLabel
+               OpLoopMerge %14 %15 None
+               OpBranch %16
+         %16 = OpLabel
+               OpSelectionMerge %17 None
+               OpSwitch %6 %18 1 %19 2 %20
+         %18 = OpLabel
+               OpBranch %17
+         %19 = OpLabel
+               OpBranch %15
+         %20 = OpLabel
+               OpBranch %17
+         %17 = OpLabel
+               OpBranch %15
+         %15 = OpLabel
+               OpBranchConditional %8 %13 %14
+         %14 = OpLabel
+               OpSelectionMerge %21 None
+               OpBranchConditional %8 %22 %21
+         %22 = OpLabel
+               OpSelectionMerge %23 None
+               OpBranchConditional %8 %24 %23
+         %24 = OpLabel
+               OpBranch %10
+         %23 = OpLabel
+               OpBranch %21
+         %21 = OpLabel
+               OpBranch %11
+         %10 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, PhiResultInvalidSampler) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%sampler = OpTypeSampler
+%ptr_uc_sampler = OpTypePointer UniformConstant %sampler
+%sampler_var = OpVariable %ptr_uc_sampler UniformConstant
+%undef_bool = OpUndef %bool
+%undef_sampler = OpUndef %sampler
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_sampler = OpLoad %sampler %sampler_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %sampler %undef_sampler %entry %ld_sampler %loop
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("Result type cannot be OpTypeSampler"));
+}
+
+TEST_F(ValidateCFG, PhiResultInvalidImage) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%image = OpTypeImage %f32 2D 0 0 0 1 Rgba32f
+%ptr_uc_image = OpTypePointer UniformConstant %image
+%image_var = OpVariable %ptr_uc_image UniformConstant
+%undef_bool = OpUndef %bool
+%undef_image = OpUndef %image
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_image = OpLoad %image %image_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %image %undef_image %entry %ld_image %loop
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("Result type cannot be OpTypeImage"));
+}
+
+TEST_F(ValidateCFG, PhiResultInvalidSampledImage) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%sampler = OpTypeSampler
+%ptr_uc_sampler = OpTypePointer UniformConstant %sampler
+%sampler_var = OpVariable %ptr_uc_sampler UniformConstant
+%image = OpTypeImage %f32 2D 0 0 0 1 Rgba32f
+%ptr_uc_image = OpTypePointer UniformConstant %image
+%image_var = OpVariable %ptr_uc_image UniformConstant
+%sampled_image = OpTypeSampledImage %image
+%undef_bool = OpUndef %bool
+%undef_sampled_image = OpUndef %sampled_image
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_image = OpLoad %image %image_var
+%ld_sampler = OpLoad %sampler %sampler_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %sampled_image %undef_sampled_image %entry %sample %loop
+%sample = OpSampledImage %sampled_image %ld_image %ld_sampler
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("Result type cannot be OpTypeSampledImage"));
+}
+
+TEST_F(ValidateCFG, PhiResultValidPreLegalizationSampler) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%sampler = OpTypeSampler
+%ptr_uc_sampler = OpTypePointer UniformConstant %sampler
+%sampler_var = OpVariable %ptr_uc_sampler UniformConstant
+%undef_bool = OpUndef %bool
+%undef_sampler = OpUndef %sampler
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_sampler = OpLoad %sampler %sampler_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %sampler %undef_sampler %entry %ld_sampler %loop
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  options_->before_hlsl_legalization = true;
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, PhiResultValidPreLegalizationImage) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%image = OpTypeImage %f32 2D 0 0 0 1 Rgba32f
+%ptr_uc_image = OpTypePointer UniformConstant %image
+%image_var = OpVariable %ptr_uc_image UniformConstant
+%undef_bool = OpUndef %bool
+%undef_image = OpUndef %image
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_image = OpLoad %image %image_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %image %undef_image %entry %ld_image %loop
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  options_->before_hlsl_legalization = true;
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, PhiResultValidPreLegalizationSampledImage) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%void = OpTypeVoid
+%bool = OpTypeBool
+%f32 = OpTypeFloat 32
+%sampler = OpTypeSampler
+%ptr_uc_sampler = OpTypePointer UniformConstant %sampler
+%sampler_var = OpVariable %ptr_uc_sampler UniformConstant
+%image = OpTypeImage %f32 2D 0 0 0 1 Rgba32f
+%ptr_uc_image = OpTypePointer UniformConstant %image
+%image_var = OpVariable %ptr_uc_image UniformConstant
+%sampled_image = OpTypeSampledImage %image
+%undef_bool = OpUndef %bool
+%undef_sampled_image = OpUndef %sampled_image
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%entry = OpLabel
+%ld_image = OpLoad %image %image_var
+%ld_sampler = OpLoad %sampler %sampler_var
+OpBranch %loop
+%loop = OpLabel
+%phi = OpPhi %sampled_image %undef_sampled_image %entry %sample %loop
+%sample = OpSampledImage %sampled_image %ld_image %ld_sampler
+OpLoopMerge %exit %loop None
+OpBranchConditional %undef_bool %exit %loop
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  options_->before_hlsl_legalization = true;
+  CompileSuccessfully(text);
+  ASSERT_EQ(SPV_SUCCESS, ValidateInstructions());
+}
+
+TEST_F(ValidateCFG, UnreachableIsStaticallyReachable) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeFunction %1
+%3 = OpFunction %1 None %2
+%4 = OpLabel
+OpBranch %5
+%5 = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateAndRetrieveValidationState());
+
+  auto f = vstate_->function(3);
+  auto entry = f->GetBlock(4).first;
+  ASSERT_TRUE(entry->reachable());
+  auto end = f->GetBlock(5).first;
+  ASSERT_TRUE(end->reachable());
+}
+
+TEST_F(ValidateCFG, BlockOrderDoesNotAffectReachability) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+%1 = OpTypeVoid
+%2 = OpTypeFunction %1
+%3 = OpTypeBool
+%4 = OpUndef %3
+%5 = OpFunction %1 None %2
+%6 = OpLabel
+OpBranch %7
+%7 = OpLabel
+OpSelectionMerge %8 None
+OpBranchConditional %4 %9 %10
+%8 = OpLabel
+OpReturn
+%9 = OpLabel
+OpBranch %8
+%10 = OpLabel
+OpBranch %8
+%11 = OpLabel
+OpUnreachable
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_SUCCESS, ValidateAndRetrieveValidationState());
+
+  auto f = vstate_->function(5);
+  auto b6 = f->GetBlock(6).first;
+  auto b7 = f->GetBlock(7).first;
+  auto b8 = f->GetBlock(8).first;
+  auto b9 = f->GetBlock(9).first;
+  auto b10 = f->GetBlock(10).first;
+  auto b11 = f->GetBlock(11).first;
+
+  ASSERT_TRUE(b6->reachable());
+  ASSERT_TRUE(b7->reachable());
+  ASSERT_TRUE(b8->reachable());
+  ASSERT_TRUE(b9->reachable());
+  ASSERT_TRUE(b10->reachable());
+  ASSERT_FALSE(b11->reachable());
+}
+
+TEST_F(ValidateCFG, PhiInstructionWithDuplicateIncomingEdges) {
+  const std::string text = R"(
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %4 "main"
+               OpExecutionMode %4 OriginUpperLeft
+               OpSource ESSL 320
+          %2 = OpTypeVoid
+          %3 = OpTypeFunction %2
+          %6 = OpTypeBool
+          %7 = OpConstantTrue %6
+          %4 = OpFunction %2 None %3
+          %5 = OpLabel
+               OpSelectionMerge %10 None
+               OpBranchConditional %7 %8 %9
+          %8 = OpLabel
+               OpBranch %10
+          %9 = OpLabel
+	       OpBranch %10
+         %10 = OpLabel
+	 %11 = OpPhi %6 %7 %8 %7 %8
+               OpReturn
+               OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("OpPhi references incoming basic block <id> "));
+  EXPECT_THAT(getDiagnosticString(), HasSubstr("multiple times."));
+}
+
+TEST_F(ValidateCFG, PhiOnVoid) {
+  const std::string text = R"(
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %4 "main"
+               OpExecutionMode %4 OriginUpperLeft
+               OpSource ESSL 320
+               OpName %4 "main"
+               OpName %6 "foo("
+          %2 = OpTypeVoid
+          %3 = OpTypeFunction %2
+          %4 = OpFunction %2 None %3
+          %5 = OpLabel
+          %8 = OpFunctionCall %2 %6
+               OpBranch %20
+         %20 = OpLabel
+         %21 = OpPhi %2 %8 %20
+               OpReturn
+               OpFunctionEnd
+          %6 = OpFunction %2 None %3
+          %7 = OpLabel
+               OpReturn
+               OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_DATA, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("OpPhi must not have void result type"));
+}
+
+TEST_F(ValidateCFG, InvalidExitSingleBlockLoop) {
+  const std::string text = R"(
+OpCapability Shader
+OpCapability Linkage
+OpMemoryModel Logical GLSL450
+OpName %5 "BAD"
+%void = OpTypeVoid
+%bool = OpTypeBool
+%undef = OpUndef %bool
+%void_fn = OpTypeFunction %void
+%fn = OpFunction %void None %void_fn
+%1 = OpLabel
+OpBranch %2
+%2 = OpLabel
+OpLoopMerge %3 %4 None
+OpBranchConditional %undef %3 %5
+%5 = OpLabel
+OpLoopMerge %6 %5 None
+OpBranchConditional %undef %5 %4
+%6 = OpLabel
+OpReturn
+%4 = OpLabel
+OpBranch %2
+%3 = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(text);
+  EXPECT_EQ(SPV_ERROR_INVALID_CFG, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("block <ID> 1[%BAD] exits the continue headed by <ID> "
+                        "1[%BAD], but not via a structured exit"));
+}
 
 }  // namespace
 }  // namespace val
